@@ -1,0 +1,66 @@
+# Core dependencies
+aiohttp>=3.9.0
+asyncio-throttle>=1.0.2
+fastapi>=0.104.0
+uvicorn>=0.24.0
+pydantic>=2.5.0
+
+# Network scanning
+python-nmap>=0.7.1
+scapy>=2.5.0
+socketIO-client>=0.7.2
+
+# Web security testing
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+selenium>=4.15.0
+websocket-client>=1.6.0
+
+# Cryptography and SSL
+cryptography>=41.0.0
+pyOpenSSL>=23.3.0
+paramiko>=3.3.0
+pynacl>=1.5.0
+
+# Database testing
+pymysql>=1.1.0
+psycopg2-binary>=2.9.9
+pymongo>=4.6.0
+redis>=5.0.0
+
+# LDAP/AD testing
+python-ldap>=3.4.4
+pyasn1>=0.5.1
+
+# Kubernetes and Cloud
+kubernetes>=28.1.0
+boto3>=1.29.0
+azure-identity>=1.15.0
+azure-mgmt-compute>=30.4.0
+google-cloud-storage>=2.13.0
+
+# Exploit frameworks
+pwntools>=4.11.0
+impacket>=0.11.0
+
+# Data processing
+colorama>=0.4.6
+tabulate>=0.9.0
+jinja2>=3.1.2
+matplotlib>=3.8.0
+pandas>=2.1.0
+
+# API clients
+httpx>=0.25.0
+websockets>=12.0
+
+# Rate limiting
+aiolimiter>=1.1.0
+
+# DNS
+dnspython>=2.4.0
+
+# Additional security tools
+yara-python>=4.3.0
+pefile>=2023.2.7
