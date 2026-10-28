@@ -11,6 +11,12 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlencode
+
+from vulnscanner.security import (
+    ScopeError, require_target_in_scope, validate_ports, validate_targets,
+    require_feature_enabled,
+)
 
 
 @dataclass
@@ -54,19 +60,9 @@ class ScannerEngine:
         return {
             'sqli': [
                 "' OR '1'='1", "' OR '1'='1'--", "' OR '1'='1'/*",
-                "1' ORDER BY 1--", "1' ORDER BY 2--", "1' ORDER BY 3--",
-                "' UNION SELECT NULL--", "' UNION SELECT NULL,NULL--",
-                "1'; WAITFOR DELAY '0:0:5'--", "1'; pg_sleep(5)--",
-                "admin'--", "1' AND '1'='1", "' OR 1=1--",
+                "'", '"', "' AND '1'='1", "' AND '1'='2",
             ],
-            'xss': [
-                "<script>alert('XSS')</script>", "<img src=x onerror=alert(1)>",
-                "<svg onload=alert(1)>", "<body onload=alert(1)>",
-                "javascript:alert(1)", "<iframe src='javascript:alert(1)'>",
-                "'\"><script>alert('XSS')</script>", "<SCRIPT>alert(1)</SCRIPT>",
-                "<img src=x onerror=alert(document.cookie)>",
-                "${alert(1)}", "{{constructor.constructor('alert(1)')()}}",
-            ],
+            'xss': ['<pen-xss-probe>', "\"'><pen-xss-probe>"],
             'traversal': [
                 "../../../etc/passwd", "..\\..\\..\\windows\\system32\\config\\sam",
                 "....//....//....//etc/passwd", "%2e%2e%2f%2e%2e%2f%2e%2e%2fetc/passwd",
@@ -88,8 +84,12 @@ class ScannerEngine:
         }
         
     async def initialize(self):
-        connector = aiohttp.TCPConnector(limit=100, ssl=False)
-        self.session = aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=30))
+        # Keep TLS certificate validation enabled and cap connection pressure.
+        connector = aiohttp.TCPConnector(limit=30)
+        self.session = aiohttp.ClientSession(
+            connector=connector,
+            timeout=aiohttp.ClientTimeout(total=float(self.config.get('timeout', 10))),
+        )
         
     async def close(self):
         if self.session:
@@ -97,19 +97,29 @@ class ScannerEngine:
         self.executor.shutdown(wait=True)
 
     def add_target(self, host: str, ports: List[int] = None):
-        target = Target(host=host, ports=ports or list(range(1, 1025)))
-        self.targets.append(target)
+        """Add only a target that is within the explicitly configured scope."""
+        validate_targets([host])
+        if '://' in host:
+            raise ScopeError('ScannerEngine expects a hostname, IP address, or CIDR, not a URL')
+        selected_ports = validate_ports(ports)
+        if selected_ports is None:
+            selected_ports = [21, 22, 25, 53, 80, 110, 139, 143, 443, 445,
+                              465, 587, 993, 995, 1433, 1521, 2049, 3306,
+                              3389, 5432, 5900, 6379, 8080, 8443]
+        self.targets.append(Target(host=host.strip(), ports=selected_ports))
         
     def _generate_vuln_id(self, name: str, host: str) -> str:
         data = f"{name}:{host}:{time.time()}"
         return f"VULN-{hashlib.md5(data.encode()).hexdigest()[:12].upper()}"
 
     async def port_scan(self, target: Target) -> Dict[int, Dict]:
+        require_target_in_scope(target.host)
         services = {}
         try:
             import nmap
             nm = nmap.PortScanner()
-            nm.scan(target.host, arguments='-sS -sV -T4 --host-timeout 30m')
+            port_spec = ','.join(str(port) for port in target.ports)
+            nm.scan(hosts=target.host, ports=port_spec, arguments='-sT -sV --version-light -T2 --host-timeout 5m')
             
             for host in nm.all_hosts():
                 for proto in nm[host].all_protocols():
@@ -135,7 +145,7 @@ class ScannerEngine:
             try:
                 async with self.session.get(
                     f"https://services.nvd.nist.gov/rest/json/cves/2.0",
-                    params={'cpeName': cpe}
+                    params={'cpeName': cpe}, allow_redirects=False
                 ) as response:
                     if response.status == 200:
                         data = await response.json()
@@ -155,11 +165,13 @@ class ScannerEngine:
         return results
 
     async def test_sqli(self, url: str) -> List[Vulnerability]:
+        require_target_in_scope(url)
+        require_feature_enabled('PEN_ENABLE_ACTIVE_TESTS', 'Active SQL injection probes')
         vulnerabilities = []
         for payload in self.payloads['sqli']:
             try:
-                test_url = f"{url}?id={payload}"
-                async with self.session.get(test_url) as response:
+                test_url = f"{url}{'&' if '?' in url else '?'}{urlencode({'id': payload})}"
+                async with self.session.get(test_url, allow_redirects=False) as response:
                     content = await response.text()
                     errors = ["SQL syntax", "mysql_fetch", "ORA-", "PostgreSQL", "syntax error"]
                     for err in errors:
@@ -167,11 +179,11 @@ class ScannerEngine:
                             vulnerabilities.append(Vulnerability(
                                 vuln_id=self._generate_vuln_id("SQLI", url),
                                 name="SQL Injection",
-                                severity="CRITICAL", cvss_score=9.8,
-                                description=f"SQL Injection detected",
+                                severity="HIGH", cvss_score=7.5,
+                                description="Database error correlated with a SQL injection probe; manual validation required",
                                 affected_component=url,
                                 remediation="Use parameterized queries",
-                                cwe_id="CWE-89", exploit_available=True
+                                cwe_id="CWE-89", exploit_available=False
                             ))
                             return vulnerabilities
             except Exception:
@@ -179,21 +191,23 @@ class ScannerEngine:
         return vulnerabilities
 
     async def test_xss(self, url: str) -> List[Vulnerability]:
+        require_target_in_scope(url)
+        require_feature_enabled('PEN_ENABLE_ACTIVE_TESTS', 'Active XSS reflection probes')
         vulnerabilities = []
         for payload in self.payloads['xss']:
             try:
-                test_url = f"{url}?input={payload}"
-                async with self.session.get(test_url) as response:
+                test_url = f"{url}{'&' if '?' in url else '?'}{urlencode({'input': payload})}"
+                async with self.session.get(test_url, allow_redirects=False) as response:
                     content = await response.text()
-                    if payload in content or "alert" in content.lower():
+                    if payload in content:
                         vulnerabilities.append(Vulnerability(
                             vuln_id=self._generate_vuln_id("XSS", url),
-                            name="Cross-Site Scripting",
-                            severity="HIGH", cvss_score=8.1,
-                            description="XSS vulnerability detected",
+                            name="Unencoded HTML Reflection",
+                            severity="MEDIUM", cvss_score=5.3,
+                            description="An inert HTML marker was reflected; script execution has not been demonstrated",
                             affected_component=url,
                             remediation="Implement output encoding",
-                            cwe_id="CWE-79", exploit_available=True
+                            cwe_id="CWE-79", exploit_available=False
                         ))
                         break
             except Exception:
@@ -201,6 +215,7 @@ class ScannerEngine:
         return vulnerabilities
 
     async def check_security_headers(self, url: str) -> List[Vulnerability]:
+        require_target_in_scope(url)
         vulnerabilities = []
         required = {
             'X-Frame-Options': 'HIGH', 'X-Content-Type-Options': 'MEDIUM',
@@ -208,7 +223,7 @@ class ScannerEngine:
             'Referrer-Policy': 'LOW', 'Permissions-Policy': 'LOW'
         }
         try:
-            async with self.session.get(url) as response:
+            async with self.session.get(url, allow_redirects=False) as response:
                 headers = response.headers
                 for header, severity in required.items():
                     if header not in headers:
@@ -225,11 +240,13 @@ class ScannerEngine:
         return vulnerabilities
 
     async def test_ssrf(self, url: str) -> List[Vulnerability]:
+        require_target_in_scope(url)
+        require_feature_enabled('PEN_ENABLE_SSRF_PROBES', 'SSRF probes')
         vulnerabilities = []
         for payload in self.payloads['ssrf'][:3]:
             try:
-                test_url = f"{url}?url={payload}"
-                async with self.session.get(test_url) as response:
+                test_url = f"{url}{'&' if '?' in url else '?'}{urlencode({'url': payload})}"
+                async with self.session.get(test_url, allow_redirects=False) as response:
                     content = await response.text()
                     indicators = ["SSH-", "ami-id", "root:", "Apache Status"]
                     if any(ind in content for ind in indicators):
@@ -248,17 +265,17 @@ class ScannerEngine:
         return vulnerabilities
 
     async def web_scan(self, target: Target, url: str) -> List[Vulnerability]:
-        vulnerabilities = []
-        tasks = [
-            self.test_sqli(url), self.test_xss(url),
-            self.check_security_headers(url), self.test_ssrf(url)
-        ]
+        """Run passive checks by default; active checks require explicit opt-in."""
+        require_target_in_scope(url)
+        tasks = [self.check_security_headers(url)]
+        if self.config.get('enable_active_tests'):
+            require_feature_enabled('PEN_ENABLE_ACTIVE_TESTS', 'Active web checks')
+            tasks.extend([self.test_sqli(url), self.test_xss(url)])
         results = await asyncio.gather(*tasks)
-        for result in results:
-            vulnerabilities.extend(result)
-        return vulnerabilities
+        return [vuln for result in results for vuln in result]
 
     async def service_scan(self, target: Target, port: int, service: Dict) -> List[Vulnerability]:
+        require_target_in_scope(target.host)
         vulnerabilities = []
         service_name = service.get('name', '').lower()
         cpe = service.get('cpe', '')
@@ -275,7 +292,7 @@ class ScannerEngine:
                 affected_component=f"{target.host}:{port}/{service_name}",
                 remediation="Update to latest version",
                 cve_id=cve['id'],
-                exploit_available=True
+                exploit_available=False
             ))
         
         if service_name in ['http', 'https']:
@@ -287,28 +304,29 @@ class ScannerEngine:
         return vulnerabilities
 
     async def run_full_scan(self) -> Dict[str, List[Vulnerability]]:
+        if not self.targets:
+            raise ScopeError('No targets have been configured')
+        for target in self.targets:
+            require_target_in_scope(target.host)
         await self.initialize()
         self.scan_active = True
         results = {}
-        
-        for target in self.targets:
-            print(f"\n[*] Scanning target: {target.host}")
-            
-            services = await self.port_scan(target)
-            all_vulns = []
-            
-            for port, service in services.items():
-                if service['state'] == 'open':
-                    vulns = await self.service_scan(target, port, service)
-                    all_vulns.extend(vulns)
-            
-            results[target.host] = all_vulns
-            self.results.extend(all_vulns)
-            print(f"[+] Found {len(all_vulns)} vulnerabilities")
-            
-        self.scan_active = False
-        await self.close()
-        return results
+        try:
+            for target in self.targets:
+                print(f"\n[*] Scanning target: {target.host}")
+                services = await self.port_scan(target)
+                all_vulns = []
+                for port, service in services.items():
+                    if service['state'] == 'open':
+                        vulns = await self.service_scan(target, port, service)
+                        all_vulns.extend(vulns)
+                results[target.host] = all_vulns
+                self.results.extend(all_vulns)
+                print(f"[+] Found {len(all_vulns)} vulnerabilities")
+            return results
+        finally:
+            self.scan_active = False
+            await self.close()
 
     def export_results(self, output_path: str, fmt: str = 'json'):
         data = [{

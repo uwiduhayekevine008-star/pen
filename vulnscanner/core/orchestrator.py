@@ -4,6 +4,12 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
 import json
+import os
+
+from vulnscanner.security import (
+    ScopeError, require_target_in_scope, validate_targets, validate_ports,
+    require_feature_enabled,
+)
 
 
 @dataclass
@@ -25,9 +31,15 @@ class VulnerabilityScanner:
         self.verbose = self.config.get('verbose', False)
     
     async def scan_host(self, host: str, ports: List[int] = None) -> ScanResult:
-        """Full vulnerability scan of a single host"""
+        """Run a scoped scan of a single host using passive checks by default."""
+        validate_targets([host])
+        if '://' in host or '/' in host:
+            raise ScopeError('This scanner entry point expects a hostname or IP, not a URL or CIDR')
+        require_target_in_scope(host)
+        ports = validate_ports(ports)
         start_time = datetime.now()
         
+        # 1. Port scan
         if self.verbose:
             print(f"[*] Scanning ports on {host}")
         
@@ -35,16 +47,19 @@ class VulnerabilityScanner:
         port_scanner = NetworkScanner(timeout=self.timeout)
         open_ports = await port_scanner.scan_ports(host, ports)
         
-        if self.verbose:
-            print(f"[*] Running service checks on {host}")
-        
-        from vulnscanner.core.checks.services import check_service
+        # Service-specific protocol commands (e.g. FTP anonymous login or Redis INFO)
+        # are opt-in. The default scan uses banner/service detection only.
         service_vulns = []
+        if self.config.get('enable_service_probes'):
+            require_feature_enabled('PEN_ENABLE_SERVICE_PROBES', 'Service-specific probes')
+            if self.verbose:
+                print(f"[*] Running explicitly enabled service probes on {host}")
+            from vulnscanner.core.checks.services import check_service
+            for port, service_info in open_ports.items():
+                vulns = await check_service(host, port, service_info.service)
+                service_vulns.extend(vulns)
         
-        for port, service_info in open_ports.items():
-            vulns = await check_service(host, port, service_info.service)
-            service_vulns.extend(vulns)
-        
+        # 3. Web application scanning
         web_vulns = []
         for port, service_info in open_ports.items():
             if service_info.service in ['http', 'https', 'http-proxy']:
@@ -56,9 +71,10 @@ class VulnerabilityScanner:
                 protocol = 'https' if 'https' in service_info.service or port == 443 else 'http'
                 url = f"{protocol}://{host}:{port}"
                 
-                vulns = await web_scanner.full_scan(url)
+                vulns = await web_scanner.full_scan(url, active=bool(self.config.get('enable_active_tests')))
                 web_vulns.extend(vulns)
         
+        # 4. SSL/TLS analysis
         ssl_vulns = []
         if 443 in open_ports or any('https' in open_ports[p].service for p in open_ports):
             if self.verbose:
@@ -68,8 +84,10 @@ class VulnerabilityScanner:
             ssl_analyzer = SSLAnalyzer(timeout=self.timeout)
             ssl_vulns = ssl_analyzer.full_analysis(host, 443)
         
+        # 5. Directory scanning for web services
         dir_vulns = []
         if self.config.get('full_scan'):
+            require_feature_enabled('PEN_ENABLE_DIRECTORY_DISCOVERY', 'Directory discovery')
             for port in [80, 443, 8080]:
                 if port in open_ports:
                     from vulnscanner.core.scanners.directory import DirectoryScanner
@@ -87,13 +105,20 @@ class VulnerabilityScanner:
                                 'description': f'Sensitive file accessible: {f.url}'
                             })
         
-        if self.verbose:
-            print(f"[*] Running exploit checks on {host}")
+        # 6. Active exploit checks are never part of the default scan.
+        exploit_results = []
+        if self.config.get('enable_exploit_checks'):
+            require_feature_enabled('PEN_ENABLE_EXPLOIT_CHECKS', 'Exploit checks')
+            if self.verbose:
+                print(f"[*] Running explicitly enabled exploit checks on {host}")
+            from vulnscanner.core.checks.exploits import ExploitScanner
+            exploit_scanner = ExploitScanner(timeout=self.timeout)
+            try:
+                exploit_results = await exploit_scanner.full_scan(host, open_ports)
+            finally:
+                await exploit_scanner.close()
         
-        from vulnscanner.core.checks.exploits import ExploitScanner
-        exploit_scanner = ExploitScanner(timeout=self.timeout)
-        exploit_results = await exploit_scanner.full_scan(host, open_ports)
-        
+        # Compile results
         all_vulns = []
         all_vulns.extend([v.__dict__ for v in service_vulns])
         all_vulns.extend([v.__dict__ for v in web_vulns])
@@ -102,6 +127,7 @@ class VulnerabilityScanner:
         
         exploits = [e.__dict__ for e in exploit_results if e.vulnerable]
         
+        # Calculate risk score
         risk_score = self._calculate_risk(all_vulns, exploits)
         
         return ScanResult(
@@ -127,10 +153,21 @@ class VulnerabilityScanner:
         return min(100, vuln_score + exploit_score)
     
     async def scan_multiple(self, targets: List[str], ports: List[int] = None) -> List[ScanResult]:
-        """Scan multiple targets"""
-        tasks = [self.scan_host(target, ports) for target in targets]
-        results = await asyncio.gather(*tasks)
-        return list(results)
+        """Scan a bounded, in-scope target batch with limited concurrency."""
+        targets = validate_targets(targets)
+        ports = validate_ports(ports)
+        try:
+            limit = int(os.getenv('PEN_MAX_CONCURRENT_TARGETS', '2'))
+        except ValueError:
+            limit = 2
+        limit = min(max(1, limit), 10)
+        semaphore = asyncio.Semaphore(limit)
+
+        async def limited_scan(target: str) -> ScanResult:
+            async with semaphore:
+                return await self.scan_host(target, ports)
+
+        return list(await asyncio.gather(*(limited_scan(target) for target in targets)))
     
     def generate_report(self, results: List[ScanResult], output_format: str = 'json') -> str:
         """Generate scan report"""

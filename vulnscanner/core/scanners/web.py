@@ -4,6 +4,9 @@ import aiohttp
 from typing import List, Dict, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
+from urllib.parse import urlencode
+
+from vulnscanner.security import require_target_in_scope, require_feature_enabled
 
 
 @dataclass
@@ -33,7 +36,8 @@ class WebScanner:
             await self.session.close()
     
     async def check_security_headers(self, url: str) -> List[WebVuln]:
-        """Check for missing security headers"""
+        """Check for missing security headers using a normal GET request."""
+        require_target_in_scope(url)
         vulns = []
         headers = {
             'X-Frame-Options': ('HIGH', 8.0, 'Clickjacking protection'),
@@ -49,7 +53,7 @@ class WebScanner:
         }
         
         try:
-            async with self.session.get(url) as resp:
+            async with self.session.get(url, allow_redirects=False) as resp:
                 for header, (sev, cvss, desc) in headers.items():
                     if header not in resp.headers:
                         vulns.append(WebVuln(
@@ -64,26 +68,26 @@ class WebScanner:
         return vulns
     
     async def test_sqli(self, url: str, param: str = 'id') -> List[WebVuln]:
-        """Test for SQL injection"""
+        """Low-impact SQL error/boolean probes; active checks require explicit opt-in."""
+        require_target_in_scope(url)
+        require_feature_enabled('PEN_ENABLE_ACTIVE_TESTS', 'Active SQL injection probes')
         vulns = []
         payloads = [
-            "' OR '1'='1", "' OR '1'='1'--", "' UNION SELECT NULL--",
-            "1' ORDER BY 1--", "'; WAITFOR DELAY '0:0:3'--", "1' AND SLEEP(3)--",
-            "' AND '1'='1", "' AND '1'='2", "' OR ''='", "' OR 'x'='x"
+            "'", '"', "' AND '1'='1", "' AND '1'='2", "' OR '1'='1'--"
         ]
         errors = ['sql syntax', 'mysql_fetch', 'ora-', 'postgresql', 'sqlite', 'odbc', 'syntax error']
         
         for payload in payloads:
             try:
-                test_url = f"{url}?{param}={payload}"
-                async with self.session.get(test_url) as resp:
+                test_url = f"{url}{'&' if '?' in url else '?'}{urlencode({param: payload})}"
+                async with self.session.get(test_url, allow_redirects=False) as resp:
                     text = await resp.text()
                     for err in errors:
                         if err in text.lower():
                             vulns.append(WebVuln(
-                                url=test_url, vuln_type='SQL Injection',
-                                severity='CRITICAL', cvss=9.8,
-                                description='SQL injection vulnerability',
+                                url=test_url, vuln_type='Potential SQL Injection',
+                                severity='HIGH', cvss=7.5,
+                                description='Database error correlated with an SQL injection probe; manual validation required',
                                 evidence=f'Error: {err}',
                                 remediation='Use parameterized queries'
                             ))
@@ -93,29 +97,23 @@ class WebScanner:
         return vulns
     
     async def test_xss(self, url: str, param: str = 'input') -> List[WebVuln]:
-        """Test for XSS"""
+        """Check reflection with inert markers; do not send executable scripts."""
+        require_target_in_scope(url)
+        require_feature_enabled('PEN_ENABLE_ACTIVE_TESTS', 'Active XSS reflection probes')
         vulns = []
-        payloads = [
-            "<script>alert('XSS')</script>",
-            "<img src=x onerror=alert(1)>",
-            "<svg onload=alert(1)>",
-            "javascript:alert(1)",
-            "${alert(1)}",
-            "<ScRiPt>alert(1)</sCrIpT>",
-            "<img/src=x/onerror=alert(1)>"
-        ]
+        payloads = ['<pen-xss-probe>', "\"'><pen-xss-probe>"]
         
         for payload in payloads:
             try:
-                test_url = f"{url}?{param}={payload}"
-                async with self.session.get(test_url) as resp:
+                test_url = f"{url}{'&' if '?' in url else '?'}{urlencode({param: payload})}"
+                async with self.session.get(test_url, allow_redirects=False) as resp:
                     text = await resp.text()
                     if payload in text or ('alert' in text and '<script>' in payload):
                         vulns.append(WebVuln(
-                            url=test_url, vuln_type='Cross-Site Scripting',
-                            severity='HIGH', cvss=8.1,
-                            description='Reflected XSS vulnerability',
-                            evidence='Payload reflected in response',
+                            url=test_url, vuln_type='Unencoded HTML Reflection',
+                            severity='MEDIUM', cvss=5.3,
+                            description='An inert HTML marker was reflected; script execution has not been demonstrated',
+                            evidence='Inert marker reflected in response; manual browser validation required',
                             remediation='Encode output and validate input'
                         ))
                         return vulns
@@ -124,7 +122,9 @@ class WebScanner:
         return vulns
     
     async def test_lfi(self, url: str, param: str = 'file') -> List[WebVuln]:
-        """Test for Local File Inclusion"""
+        """Test file-read behavior; requires a separate explicit opt-in."""
+        require_target_in_scope(url)
+        require_feature_enabled('PEN_ENABLE_FILE_READ_PROBES', 'File-read probes')
         vulns = []
         payloads = [
             '../../../etc/passwd', '....//....//....//etc/passwd',
@@ -135,8 +135,8 @@ class WebScanner:
         
         for payload in payloads:
             try:
-                test_url = f"{url}?{param}={payload}"
-                async with self.session.get(test_url) as resp:
+                test_url = f"{url}{'&' if '?' in url else '?'}{urlencode({param: payload})}"
+                async with self.session.get(test_url, allow_redirects=False) as resp:
                     text = await resp.text()
                     for ind in indicators:
                         if ind in text:
@@ -153,7 +153,9 @@ class WebScanner:
         return vulns
     
     async def test_ssrf(self, url: str, param: str = 'url') -> List[WebVuln]:
-        """Test for SSRF"""
+        """Test SSRF behavior; requires a separate explicit opt-in."""
+        require_target_in_scope(url)
+        require_feature_enabled('PEN_ENABLE_SSRF_PROBES', 'SSRF probes')
         vulns = []
         payloads = [
             'http://127.0.0.1:22', 'http://localhost:80/server-status',
@@ -164,8 +166,8 @@ class WebScanner:
         
         for payload in payloads:
             try:
-                test_url = f"{url}?{param}={payload}"
-                async with self.session.get(test_url) as resp:
+                test_url = f"{url}{'&' if '?' in url else '?'}{urlencode({param: payload})}"
+                async with self.session.get(test_url, allow_redirects=False) as resp:
                     text = await resp.text()
                     for ind in indicators:
                         if ind in text:
@@ -182,7 +184,9 @@ class WebScanner:
         return vulns
     
     async def test_cmdi(self, url: str, param: str = 'cmd') -> List[WebVuln]:
-        """Test for Command Injection"""
+        """Test command injection; requires a separate explicit opt-in."""
+        require_target_in_scope(url)
+        require_feature_enabled('PEN_ENABLE_COMMAND_INJECTION_PROBES', 'Command-injection probes')
         vulns = []
         payloads = [
             "; id", "| id", "&& id", "$(id)", "`id`",
@@ -191,8 +195,8 @@ class WebScanner:
         
         for payload in payloads:
             try:
-                test_url = f"{url}?{param}={payload}"
-                async with self.session.get(test_url) as resp:
+                test_url = f"{url}{'&' if '?' in url else '?'}{urlencode({param: payload})}"
+                async with self.session.get(test_url, allow_redirects=False) as resp:
                     text = await resp.text()
                     if 'uid=' in text or 'root:' in text or 'daemon:' in text:
                         vulns.append(WebVuln(
@@ -208,7 +212,9 @@ class WebScanner:
         return vulns
     
     async def test_ssti(self, url: str, param: str = 'template') -> List[WebVuln]:
-        """Test for Server-Side Template Injection"""
+        """Test template injection; requires a separate explicit opt-in."""
+        require_target_in_scope(url)
+        require_feature_enabled('PEN_ENABLE_TEMPLATE_INJECTION_PROBES', 'Template-injection probes')
         vulns = []
         payloads = [
             "{{7*7}}", "${7*7}", "#{7*7}",
@@ -218,8 +224,8 @@ class WebScanner:
         
         for payload in payloads:
             try:
-                test_url = f"{url}?{param}={payload}"
-                async with self.session.get(test_url) as resp:
+                test_url = f"{url}{'&' if '?' in url else '?'}{urlencode({param: payload})}"
+                async with self.session.get(test_url, allow_redirects=False) as resp:
                     text = await resp.text()
                     if '49' in text or 'config' in text.lower():
                         vulns.append(WebVuln(
@@ -235,7 +241,9 @@ class WebScanner:
         return vulns
     
     async def test_open_redirect(self, url: str, param: str = 'redirect') -> List[WebVuln]:
-        """Test for Open Redirect"""
+        """Test redirects; active checks require explicit opt-in."""
+        require_target_in_scope(url)
+        require_feature_enabled('PEN_ENABLE_ACTIVE_TESTS', 'Active redirect probes')
         vulns = []
         payloads = [
             "//attacker.com", "https:attacker.com", "https:///attacker.com",
@@ -244,7 +252,7 @@ class WebScanner:
         
         for payload in payloads:
             try:
-                test_url = f"{url}?{param}={payload}"
+                test_url = f"{url}{'&' if '?' in url else '?'}{urlencode({param: payload})}"
                 async with self.session.get(test_url, allow_redirects=False) as resp:
                     location = resp.headers.get('Location', '')
                     if payload in location or 'attacker.com' in location:
@@ -261,19 +269,25 @@ class WebScanner:
         return vulns
     
     async def test_cors(self, url: str) -> List[WebVuln]:
-        """Test for CORS misconfiguration"""
+        """Check CORS behavior with an inert Origin header."""
+        require_target_in_scope(url)
         vulns = []
         
         try:
-            async with self.session.get(url, headers={'Origin': 'http://attacker.com'}) as resp:
+            async with self.session.get(url, headers={'Origin': 'http://attacker.com'}, allow_redirects=False) as resp:
                 cors_header = resp.headers.get('Access-Control-Allow-Origin', '')
-                if cors_header == '*' or cors_header == 'http://attacker.com':
+                allows_credentials = resp.headers.get('Access-Control-Allow-Credentials', '').lower() == 'true'
+                reflects_origin = cors_header == 'http://attacker.com'
+                if reflects_origin or cors_header == '*':
+                    # Wildcard ACAO alone is not equivalent to credentialed data exposure.
+                    severity = 'HIGH' if reflects_origin and allows_credentials else 'LOW'
+                    cvss = 7.5 if severity == 'HIGH' else 2.0
                     vulns.append(WebVuln(
                         url=url, vuln_type='CORS Misconfiguration',
-                        severity='HIGH', cvss=7.5,
-                        description='CORS allows any origin',
-                        evidence=f'Access-Control-Allow-Origin: {cors_header}',
-                        remediation='Restrict Access-Control-Allow-Origin'
+                        severity=severity, cvss=cvss,
+                        description='Untrusted origin reflected' if reflects_origin else 'Wildcard CORS policy observed; impact depends on response sensitivity',
+                        evidence=f'Access-Control-Allow-Origin: {cors_header}; Access-Control-Allow-Credentials: {allows_credentials}',
+                        remediation='Allow only required trusted origins and enable credentialed access only when necessary'
                     ))
         except:
             pass
@@ -281,7 +295,9 @@ class WebScanner:
         return vulns
     
     async def test_method_override(self, url: str) -> List[WebVuln]:
-        """Test for HTTP method override"""
+        """Test non-GET methods; requires a separate explicit opt-in."""
+        require_target_in_scope(url)
+        require_feature_enabled('PEN_ENABLE_METHOD_PROBES', 'HTTP method probes')
         vulns = []
         
         methods = ['PUT', 'DELETE', 'PATCH', 'CONNECT', 'TRACE', 'DEBUG']
@@ -289,7 +305,7 @@ class WebScanner:
         for method in methods:
             try:
                 async with self.session.request(
-                    method, url, headers={'X-HTTP-Method-Override': method}
+                    method, url, headers={'X-HTTP-Method-Override': method}, allow_redirects=False
                 ) as resp:
                     if resp.status in [200, 201, 204]:
                         vulns.append(WebVuln(
@@ -305,25 +321,22 @@ class WebScanner:
         
         return vulns
     
-    async def full_scan(self, url: str) -> List[WebVuln]:
-        """Run all web security checks"""
+    async def full_scan(self, url: str, active: bool = False) -> List[WebVuln]:
+        """Run passive checks by default; active checks require explicit opt-in.
+
+        Potentially intrusive SSRF, file-read, command-injection, template-injection,
+        and HTTP-method checks are intentionally excluded from this aggregate workflow.
+        Each requires its own explicit feature flag if invoked directly.
+        """
+        require_target_in_scope(url)
+        if active:
+            require_feature_enabled('PEN_ENABLE_ACTIVE_TESTS', 'Active web checks')
         await self.init()
-        tasks = [
-            self.check_security_headers(url),
-            self.test_sqli(url),
-            self.test_xss(url),
-            self.test_lfi(url),
-            self.test_ssrf(url),
-            self.test_cmdi(url),
-            self.test_ssti(url),
-            self.test_open_redirect(url),
-            self.test_cors(url),
-            self.test_method_override(url)
-        ]
-        results = await asyncio.gather(*tasks)
-        await self.close()
-        
-        vulns = []
-        for result in results:
-            vulns.extend(result)
-        return vulns
+        try:
+            tasks = [self.check_security_headers(url), self.test_cors(url)]
+            if active:
+                tasks.extend([self.test_sqli(url), self.test_xss(url), self.test_open_redirect(url)])
+            results = await asyncio.gather(*tasks)
+            return [vuln for result in results for vuln in result]
+        finally:
+            await self.close()

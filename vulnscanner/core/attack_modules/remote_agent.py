@@ -3,10 +3,16 @@ import asyncio
 import json
 import socket
 import platform
+import os
 from typing import Dict, Optional
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass
 import uuid
+
+from vulnscanner.security import (
+    ScopeError, agent_token_is_valid, require_target_in_scope,
+    require_feature_enabled, validate_ports,
+)
+
 
 
 @dataclass
@@ -28,20 +34,26 @@ class RemoteAgent:
         self.socket = None
     
     async def connect(self):
-        """Connect to controller"""
+        """Connect to an explicitly enabled local controller using a shared secret."""
         try:
+            require_feature_enabled('PEN_ENABLE_REMOTE_AGENTS', 'Remote scanning agents')
+            agent_token = os.getenv('PEN_AGENT_TOKEN', '')
+            if not agent_token:
+                raise ScopeError('PEN_AGENT_TOKEN must be configured before starting an agent')
             self.socket = await asyncio.wait_for(
                 asyncio.open_connection(self.controller_host, self.controller_port),
                 timeout=10
             )
             reader, writer = self.socket
             
+            # Register
             reg = {
                 'type': 'register',
                 'agent_id': self.agent_id,
                 'hostname': platform.node(),
                 'platform': platform.system(),
-                'capabilities': ['scan', 'discover', 'web', 'exploit']
+                'token': agent_token,
+                'capabilities': ['port_scan', 'web_scan']
             }
             writer.write(json.dumps(reg).encode() + b'\n')
             await writer.drain()
@@ -77,6 +89,7 @@ class RemoteAgent:
                 await writer.drain()
                 
             except asyncio.TimeoutError:
+                # Send heartbeat
                 heartbeat = {'type': 'heartbeat', 'agent_id': self.agent_id}
                 writer.write(json.dumps(heartbeat).encode() + b'\n')
                 await writer.drain()
@@ -92,6 +105,14 @@ class RemoteAgent:
         params = task.get('params', {})
         
         try:
+            require_feature_enabled('PEN_ENABLE_REMOTE_AGENTS', 'Remote scanning agents')
+            if task_type in {'port_scan', 'web_scan', 'exploit_check'}:
+                if not isinstance(target, str) or not target:
+                    raise ScopeError('A target is required for this task')
+                require_target_in_scope(target)
+            if task_type == 'exploit_check':
+                require_feature_enabled('PEN_ENABLE_EXPLOIT_CHECKS', 'Exploit checks')
+                validate_ports(params.get('ports'), maximum=100)
             if task_type == 'port_scan':
                 from vulnscanner.core.scanners.network import NetworkScanner
                 scanner = NetworkScanner()
@@ -132,6 +153,8 @@ class RemoteAgent:
         while True:
             if await self.connect():
                 await self.listen()
+            
+            # Reconnect delay
             await asyncio.sleep(10)
 
 
@@ -145,11 +168,16 @@ class AgentController:
         self.server = None
     
     async def start(self):
-        """Start controller server"""
+        """Start a local-only controller; remote transport requires a reviewed TLS design."""
+        require_feature_enabled('PEN_ENABLE_REMOTE_AGENTS', 'Remote scanning agents')
+        if not os.getenv('PEN_AGENT_TOKEN'):
+            raise RuntimeError('PEN_AGENT_TOKEN must be configured before starting the controller')
+        if not 1 <= int(self.port) <= 65535:
+            raise ValueError('Port must be between 1 and 65535')
         self.server = await asyncio.start_server(
-            self.handle_agent, '0.0.0.0', self.port
+            self.handle_agent, '127.0.0.1', self.port, limit=65536
         )
-        print(f"[*] Controller listening on port {self.port}")
+        print(f"[*] Local-only controller listening on 127.0.0.1:{self.port}")
         
         async with self.server:
             await self.server.serve_forever()
@@ -168,17 +196,24 @@ class AgentController:
                 message = json.loads(data.decode())
                 
                 if message.get('type') == 'register':
-                    agent_id = message['agent_id']
+                    if not agent_token_is_valid(message.get('token')):
+                        break
+                    agent_id = str(message.get('agent_id', ''))[:64]
+                    if not agent_id:
+                        break
+                    safe_info = {key: value for key, value in message.items() if key != 'token'}
                     self.agents[agent_id] = {
-                        'info': message,
+                        'info': safe_info,
                         'writer': writer,
                         'status': 'online'
                     }
                     print(f"[+] Agent connected: {agent_id} from {addr}")
                 
                 elif message.get('type') == 'result':
+                    if not agent_id:
+                        continue
                     task_id = message.get('task_id')
-                    if task_id in self.tasks:
+                    if task_id in self.tasks and self.tasks[task_id].get('agent_id') == agent_id:
                         self.tasks[task_id]['result'] = message['result']
                         self.tasks[task_id]['status'] = 'completed'
                 
@@ -186,7 +221,7 @@ class AgentController:
                     if agent_id:
                         self.agents[agent_id]['status'] = 'online'
         
-        except Exception as e:
+        except (ValueError, json.JSONDecodeError, ConnectionError, asyncio.IncompleteReadError):
             pass
         
         finally:
@@ -196,20 +231,27 @@ class AgentController:
             writer.close()
     
     async def send_task(self, agent_id: str, task: Dict) -> str:
-        """Send task to agent"""
-        import uuid
-        task_id = str(uuid.uuid4())[:8]
-        
+        """Send only recognized, in-scope tasks to a registered local agent."""
         if agent_id not in self.agents:
             return None
-        
-        task['task_id'] = task_id
-        self.tasks[task_id] = {'status': 'pending', 'result': None}
-        
+        if not isinstance(task, dict) or task.get('task_type') not in {'port_scan', 'web_scan', 'exploit_check'}:
+            raise ScopeError('Unsupported remote task type')
+        target = task.get('target')
+        require_target_in_scope(target)
+        if task.get('task_type') == 'exploit_check':
+            require_feature_enabled('PEN_ENABLE_EXPLOIT_CHECKS', 'Exploit checks')
+        params = task.get('params') or {}
+        if not isinstance(params, dict):
+            raise ScopeError('Task params must be an object')
+        validate_ports(params.get('ports'), maximum=100)
+        task_id = str(uuid.uuid4())
+        message = dict(task)
+        message['task_id'] = task_id
+        self.tasks[task_id] = {'status': 'pending', 'result': None, 'agent_id': agent_id}
         writer = self.agents[agent_id]['writer']
-        writer.write(json.dumps(task).encode() + b'\n')
+        writer.write(json.dumps(message).encode() + b'\n')
         await writer.drain()
-        
+        self.tasks[task_id]['status'] = 'sent'
         return task_id
     
     def get_agents(self) -> Dict:
@@ -225,10 +267,14 @@ class AgentController:
 
 
 async def run_agent(controller_host: str, controller_port: int = 9999):
-    """Run agent process"""
+    """Run a local agent after explicit enablement and token configuration."""
+    require_feature_enabled('PEN_ENABLE_REMOTE_AGENTS', 'Remote scanning agents')
+    if not os.getenv('PEN_AGENT_TOKEN'):
+        raise RuntimeError('PEN_AGENT_TOKEN must be configured before starting an agent')
+    if controller_host not in {'127.0.0.1', 'localhost', '::1'}:
+        raise RuntimeError('Remote agents are restricted to loopback until TLS transport is implemented')
     agent = RemoteAgent(controller_host, controller_port)
-    await agent.connect()
-    await agent.listen()
+    await agent.run()
 
 
 async def run_controller(port: int = 9999):

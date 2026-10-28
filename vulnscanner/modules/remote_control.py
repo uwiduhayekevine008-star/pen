@@ -14,6 +14,12 @@ from typing import Dict, List, Optional, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 import queue
+import os
+
+from vulnscanner.security import (
+    ScopeError, agent_token_is_valid, require_target_in_scope,
+    require_feature_enabled,
+)
 
 
 @dataclass
@@ -43,7 +49,7 @@ class Task:
 class RemoteController:
     """Central controller for managing remote scanning agents"""
     
-    def __init__(self, host: str = "0.0.0.0", port: int = 9999):
+    def __init__(self, host: str = "127.0.0.1", port: int = 9999):
         self.host = host
         self.port = port
         self.agents: Dict[str, AgentInfo] = {}
@@ -54,7 +60,14 @@ class RemoteController:
         self.server_socket = None
         
     def start_server(self):
-        """Start the control server"""
+        """Start a local-only controller after explicit enablement and token setup."""
+        require_feature_enabled('PEN_ENABLE_REMOTE_AGENTS', 'Remote scanning agents')
+        if not os.getenv('PEN_AGENT_TOKEN'):
+            raise RuntimeError('PEN_AGENT_TOKEN must be configured before starting the controller')
+        if self.host not in {'127.0.0.1', 'localhost'}:
+            raise RuntimeError('Remote control is restricted to loopback until TLS transport is implemented')
+        if not 1 <= int(self.port) <= 65535:
+            raise ValueError('Port must be between 1 and 65535')
         self.running = True
         
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -91,6 +104,8 @@ class RemoteController:
             # Receive agent registration
             data = client_socket.recv(4096).decode()
             reg = json.loads(data)
+            if not agent_token_is_valid(reg.get('token')):
+                return
             
             agent_id = reg.get('agent_id', str(uuid.uuid4())[:8])
             
@@ -173,7 +188,16 @@ class RemoteController:
         return None
         
     def create_task(self, command: str, params: Dict, agent_id: str = "any") -> str:
-        """Create new task for agents"""
+        """Create an explicitly supported and in-scope remote task."""
+        require_feature_enabled('PEN_ENABLE_REMOTE_AGENTS', 'Remote scanning agents')
+        if command not in {'scan', 'discover'}:
+            raise ScopeError('Unsupported remote command; remote exploit execution is disabled')
+        if not isinstance(params, dict):
+            raise ScopeError('Task params must be an object')
+        target_key = 'target' if command == 'scan' else 'network'
+        require_target_in_scope(params.get(target_key))
+        if command == 'discover':
+            require_feature_enabled('PEN_ENABLE_NETWORK_DISCOVERY', 'Network discovery')
         task_id = f"TASK-{uuid.uuid4().hex[:8].upper()}"
         
         task = Task(
@@ -236,9 +260,16 @@ class RemoteAgent:
                 
                 # Register
                 import platform
+                require_feature_enabled('PEN_ENABLE_REMOTE_AGENTS', 'Remote scanning agents')
+                if not os.getenv('PEN_AGENT_TOKEN'):
+                    raise RuntimeError('PEN_AGENT_TOKEN must be configured before starting an agent')
+                if self.controller_host not in {'127.0.0.1', 'localhost'}:
+                    raise RuntimeError('Remote control is restricted to loopback until TLS transport is implemented')
                 reg = {
+                    'agent_id': str(uuid.uuid4())[:8],
                     'hostname': platform.node(),
-                    'capabilities': ['scan', 'exploit', 'web']
+                    'token': os.environ['PEN_AGENT_TOKEN'],
+                    'capabilities': ['scan', 'discover']
                 }
                 self.socket.send(json.dumps(reg).encode())
                 
@@ -289,7 +320,9 @@ class RemoteAgent:
         params = task.get('params', {})
         
         try:
+            require_feature_enabled('PEN_ENABLE_REMOTE_AGENTS', 'Remote scanning agents')
             if command == 'scan':
+                require_target_in_scope(params.get('target'))
                 # Run vulnerability scan
                 from vulnscanner.core import ScannerEngine
                 import asyncio
@@ -304,13 +337,14 @@ class RemoteAgent:
                 }
                 
             elif command == 'discover':
-                # Network discovery
+                # Network discovery needs explicit authorization and opt-in.
+                require_feature_enabled('PEN_ENABLE_NETWORK_DISCOVERY', 'Network discovery')
+                require_target_in_scope(params.get('network'))
                 hosts = self.network_discover(params.get('network'))
                 return {'status': 'success', 'hosts': hosts}
                 
             elif command == 'exploit':
-                # Run specific exploit
-                return {'status': 'success', 'message': 'Exploit executed'}
+                return {'status': 'disabled', 'message': 'Remote exploit execution is not implemented and remains disabled'}
                 
             else:
                 return {'status': 'error', 'message': f'Unknown command: {command}'}
@@ -319,7 +353,9 @@ class RemoteAgent:
             return {'status': 'error', 'message': str(e)}
             
     def network_discover(self, network: str) -> List[str]:
-        """Discover hosts on network"""
+        """Discover hosts only inside the configured authorized network scope."""
+        require_target_in_scope(network)
+        require_feature_enabled('PEN_ENABLE_NETWORK_DISCOVERY', 'Network discovery')
         hosts = []
         try:
             from scapy.all import ARP, Ether, srp

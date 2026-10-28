@@ -5,6 +5,8 @@ from typing import List, Dict, Set
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from vulnscanner.security import require_target_in_scope, require_feature_enabled
+
 
 @dataclass
 class DiscoveredFile:
@@ -72,8 +74,11 @@ class DirectoryScanner:
             await self.session.close()
     
     async def check_path(self, base_url: str, path: str) -> DiscoveredFile:
-        """Check single path"""
-        url = f"{base_url.rstrip('/')}/{path}"
+        """Check a path only on a target that is explicitly in scope."""
+        require_target_in_scope(base_url)
+        if not isinstance(path, str) or len(path) > 256 or path.startswith(('http://', 'https://', '//')):
+            raise ValueError('Invalid discovery path')
+        url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
         try:
             async with self.session.get(url, allow_redirects=False) as resp:
                 if resp.status in [200, 301, 302, 403]:
@@ -90,8 +95,12 @@ class DirectoryScanner:
         return None
     
     async def scan_files(self, base_url: str, file_list: List[str] = None) -> List[DiscoveredFile]:
-        """Scan for sensitive files"""
+        """Scan bounded file paths; requires explicit directory-discovery opt-in."""
+        require_target_in_scope(base_url)
+        require_feature_enabled('PEN_ENABLE_DIRECTORY_DISCOVERY', 'Directory discovery')
         files = file_list or list(self.SENSITIVE_FILES.keys())
+        if len(files) > 100:
+            raise ValueError('At most 100 paths may be checked in one request')
         await self.init()
         
         results = []
@@ -101,24 +110,28 @@ class DirectoryScanner:
             async with semaphore:
                 return await self.check_path(base_url, path)
         
-        tasks = [limited_check(f) for f in files]
-        found = await asyncio.gather(*tasks)
-        
-        await self.close()
-        return [f for f in found if f is not None]
+        try:
+            tasks = [limited_check(f) for f in files]
+            found = await asyncio.gather(*tasks)
+            return [f for f in found if f is not None]
+        finally:
+            await self.close()
     
     async def scan_directories(self, base_url: str) -> List[DiscoveredFile]:
-        """Scan for directories"""
+        """Scan for directories within an explicitly authorized scope."""
+        require_target_in_scope(base_url)
+        require_feature_enabled('PEN_ENABLE_DIRECTORY_DISCOVERY', 'Directory discovery')
         await self.init()
         
         found = []
-        for dirname in self.COMMON_DIRS:
-            result = await self.check_path(base_url, dirname + '/')
-            if result:
-                found.append(result)
-        
-        await self.close()
-        return found
+        try:
+            for dirname in self.COMMON_DIRS:
+                result = await self.check_path(base_url, dirname + '/')
+                if result:
+                    found.append(result)
+            return found
+        finally:
+            await self.close()
     
     async def scan_backup_files(self, base_url: str) -> List[DiscoveredFile]:
         """Scan for backup files"""
