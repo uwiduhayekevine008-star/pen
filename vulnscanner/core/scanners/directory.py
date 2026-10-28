@@ -1,8 +1,9 @@
-"""Directory and File Discovery Scanner"""
+"""Directory and File Discovery Scanner with Modern Techniques"""
 import asyncio
 import aiohttp
 from typing import List, Dict, Set
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 
 
 @dataclass
@@ -12,6 +13,7 @@ class DiscoveredFile:
     size: int
     is_sensitive: bool
     risk: str
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
 class DirectoryScanner:
@@ -118,8 +120,59 @@ class DirectoryScanner:
         await self.close()
         return found
     
+    async def scan_backup_files(self, base_url: str) -> List[DiscoveredFile]:
+        """Scan for backup files"""
+        backup_patterns = [
+            'backup.zip', 'backup.tar.gz', 'backup.tar', 'backup.sql',
+            'database.sql', 'dump.sql', 'db.sql', 'backup.tar.bz2',
+            'old.zip', 'old.tar.gz', 'site.zip', 'site.tar.gz',
+            'www.zip', 'www.tar.gz', 'web.zip', 'web.tar.gz'
+        ]
+        return await self.scan_files(base_url, backup_patterns)
+    
+    async def scan_git_exposed(self, base_url: str) -> List[DiscoveredFile]:
+        """Scan for exposed Git repositories"""
+        git_patterns = [
+            '.git/config', '.git/HEAD', '.git/index', '.git/logs/HEAD',
+            '.git/objects', '.git/refs', '.gitignore', '.gitattributes'
+        ]
+        return await self.scan_files(base_url, git_patterns)
+    
+    async def scan_svn_exposed(self, base_url: str) -> List[DiscoveredFile]:
+        """Scan for exposed SVN repositories"""
+        svn_patterns = [
+            '.svn/entries', '.svn/wc.db', '.svn/props', '.svn/text-base/',
+            'svn-base/', 'entries', 'format'
+        ]
+        return await self.scan_files(base_url, svn_patterns)
+    
+    async def scan_cloud_configs(self, base_url: str) -> List[DiscoveredFile]:
+        """Scan for cloud configuration files"""
+        cloud_patterns = [
+            'credentials.json', 'service-account.json', 'gcp-credentials.json',
+            'aws-credentials.json', 'azure-credentials.json',
+            'credentials.csv', 'credentials.txt', 'secrets.json',
+            'secrets.yaml', 'secrets.yml', 'env.json', 'env.yaml'
+        ]
+        return await self.scan_files(base_url, cloud_patterns)
+    
     async def full_scan(self, base_url: str) -> List[DiscoveredFile]:
         """Run full directory and file scan"""
         files = await self.scan_files(base_url)
         dirs = await self.scan_directories(base_url)
-        return files + dirs
+        backups = await self.scan_backup_files(base_url)
+        git = await self.scan_git_exposed(base_url)
+        svn = await self.scan_svn_exposed(base_url)
+        cloud = await self.scan_cloud_configs(base_url)
+        
+        all_results = files + dirs + backups + git + svn + cloud
+        
+        # Remove duplicates
+        seen = set()
+        unique = []
+        for f in all_results:
+            if f.url not in seen:
+                seen.add(f.url)
+                unique.append(f)
+        
+        return unique

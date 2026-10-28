@@ -2,8 +2,8 @@
 import aiohttp
 import json
 from typing import Dict, List, Optional
-from dataclasses import dataclass
-import asyncio
+from dataclasses import dataclass, field
+from datetime import datetime
 
 
 @dataclass
@@ -15,6 +15,8 @@ class CVEInfo:
     affected_products: List[str]
     exploit_available: bool
     remediation: str
+    published: str = ""
+    last_modified: str = ""
 
 
 class CVEDatabase:
@@ -120,63 +122,199 @@ class CVEDatabase:
             description=desc,
             affected_products=[],
             exploit_available=exploit_available,
-            remediation='Apply vendor patches'
+            remediation='Apply vendor patches',
+            published=cve.get('published', ''),
+            last_modified=cve.get('lastModified', '')
         )
 
 
 class ExploitDatabase:
-    """Known exploits database"""
+    """Known exploits database with modern CVEs"""
     
     EXPLOITS = {
+        # Critical vulnerabilities
         'CVE-2017-0144': {  # EternalBlue
             'name': 'EternalBlue',
             'service': 'SMB',
             'ports': [445],
-            'description': 'SMBv1 RCE vulnerability',
-            'severity': 'CRITICAL'
+            'description': 'SMBv1 RCE vulnerability (MS17-010)',
+            'severity': 'CRITICAL',
+            'cvss': 9.8,
+            'exploitable': True
         },
         'CVE-2019-0708': {  # BlueKeep
             'name': 'BlueKeep',
             'service': 'RDP',
             'ports': [3389],
             'description': 'RDP RCE vulnerability',
-            'severity': 'CRITICAL'
+            'severity': 'CRITICAL',
+            'cvss': 9.8,
+            'exploitable': True
         },
         'CVE-2014-0160': {  # Heartbleed
             'name': 'Heartbleed',
             'service': 'OpenSSL',
             'ports': [443],
             'description': 'OpenSSL heartbeat info disclosure',
-            'severity': 'HIGH'
+            'severity': 'CRITICAL',
+            'cvss': 9.8,
+            'exploitable': True
         },
         'CVE-2021-44228': {  # Log4Shell
             'name': 'Log4Shell',
             'service': 'Log4j',
-            'ports': [80, 443, 8080],
-            'description': 'Log4j RCE vulnerability',
-            'severity': 'CRITICAL'
+            'ports': [80, 443, 8080, 8443],
+            'description': 'Apache Log4j RCE',
+            'severity': 'CRITICAL',
+            'cvss': 10.0,
+            'exploitable': True
         },
         'CVE-2022-22965': {  # Spring4Shell
             'name': 'Spring4Shell',
             'service': 'Spring',
             'ports': [8080],
             'description': 'Spring Framework RCE',
-            'severity': 'CRITICAL'
+            'severity': 'CRITICAL',
+            'cvss': 9.8,
+            'exploitable': True
         },
-        'CVE-2023-38831': {  # WinRAR
-            'name': 'WinRAR ACE',
-            'service': 'WinRAR',
-            'ports': [],
-            'description': 'WinRAR ACE extraction RCE',
-            'severity': 'HIGH'
+        'CVE-2021-34473': {  # ProxyShell
+            'name': 'ProxyShell',
+            'service': 'Exchange',
+            'ports': [443],
+            'description': 'Exchange Server RCE via Proxy',
+            'severity': 'CRITICAL',
+            'cvss': 9.8,
+            'exploitable': True
         },
-        'CVE-2023-46604': {  # Apache ActiveMQ
+        'CVE-2021-34527': {  # PrintNightmare
+            'name': 'PrintNightmare',
+            'service': 'Print Spooler',
+            'ports': [445],
+            'description': 'Print Spooler RCE',
+            'severity': 'CRITICAL',
+            'cvss': 8.8,
+            'exploitable': True
+        },
+        'CVE-2022-41040': {  # ProxyToken
+            'name': 'ProxyToken',
+            'service': 'Exchange',
+            'ports': [443],
+            'description': 'Exchange OAB Virtual Directory RCE',
+            'severity': 'CRITICAL',
+            'cvss': 9.8,
+            'exploitable': True
+        },
+        'CVE-2023-28253': {  # Foxit PDF
+            'name': 'Foxit PDF RCE',
+            'service': 'Foxit',
+            'ports': [80, 443],
+            'description': 'Foxit PDF Reader RCE',
+            'severity': 'CRITICAL',
+            'cvss': 9.8,
+            'exploitable': True
+        },
+        'CVE-2023-46604': {  # ActiveMQ
             'name': 'ActiveMQ RCE',
             'service': 'ActiveMQ',
             'ports': [61616],
             'description': 'Apache ActiveMQ RCE',
-            'severity': 'CRITICAL'
-        }
+            'severity': 'CRITICAL',
+            'cvss': 9.8,
+            'exploitable': True
+        },
+        # High severity
+        'CVE-2014-6271': {  # Shellshock
+            'name': 'Shellshock',
+            'service': 'Bash',
+            'ports': [80, 443, 22],
+            'description': 'Bash environment variable injection',
+            'severity': 'HIGH',
+            'cvss': 10.0,
+            'exploitable': True
+        },
+        'CVE-2018-7600': {  # Drupalgeddon
+            'name': 'Drupalgeddon',
+            'service': 'Drupal',
+            'ports': [80, 443],
+            'description': 'Drupal core RCE',
+            'severity': 'HIGH',
+            'cvss': 9.8,
+            'exploitable': True
+        },
+        'CVE-2017-5638': {  # Apache Struts
+            'name': 'Apache Struts RCE',
+            'service': 'Struts',
+            'ports': [80, 443],
+            'description': 'Apache Struts OGNL injection',
+            'severity': 'HIGH',
+            'cvss': 9.8,
+            'exploitable': True
+        },
+        'CVE-2019-11043': {  # PHP-FPM
+            'name': 'PHP-FPM RCE',
+            'service': 'PHP-FPM',
+            'ports': [9000, 9001],
+            'description': 'PHP-FPM fastcgi header injection',
+            'severity': 'HIGH',
+            'cvss': 9.8,
+            'exploitable': True
+        },
+        'CVE-2020-5902': {  # F5 BIG-IP
+            'name': 'F5 BIG-IP RCE',
+            'service': 'F5 BIG-IP',
+            'ports': [443],
+            'description': 'F5 BIG-IP TMUI RCE',
+            'severity': 'HIGH',
+            'cvss': 9.8,
+            'exploitable': True
+        },
+        'CVE-2021-21972': {  # vCenter
+            'name': 'vCenter RCE',
+            'service': 'vCenter',
+            'ports': [443],
+            'description': 'VMware vCenter RCE',
+            'severity': 'HIGH',
+            'cvss': 9.8,
+            'exploitable': True
+        },
+        'CVE-2022-26134': {  # Confluence
+            'name': 'Confluence RCE',
+            'service': 'Confluence',
+            'ports': [80, 443],
+            'description': 'Atlassian Confluence OGNL injection',
+            'severity': 'HIGH',
+            'cvss': 9.8,
+            'exploitable': True
+        },
+        'CVE-2022-42894': {  # Spring Cloud
+            'name': 'Spring Cloud RCE',
+            'service': 'Spring Cloud',
+            'ports': [80, 443],
+            'description': 'Spring Cloud Function SpEL injection',
+            'severity': 'HIGH',
+            'cvss': 9.8,
+            'exploitable': True
+        },
+        # Medium severity
+        'CVE-2020-11710': {  # WordPress
+            'name': 'WordPress REST API',
+            'service': 'WordPress',
+            'ports': [80, 443],
+            'description': 'WordPress REST API data exposure',
+            'severity': 'MEDIUM',
+            'cvss': 6.1,
+            'exploitable': False
+        },
+        'CVE-2021-22122': {  # Fortinet
+            'name': 'Fortinet SSL VPN',
+            'service': 'Fortinet',
+            'ports': [443],
+            'description': 'Fortinet SSL VPN file disclosure',
+            'severity': 'MEDIUM',
+            'cvss': 6.5,
+            'exploitable': True
+        },
     }
     
     @classmethod
@@ -197,4 +335,20 @@ class ExploitDatabase:
             {'cve': cve, **data}
             for cve, data in cls.EXPLOITS.items()
             if port in data['ports']
+        ]
+    
+    @classmethod
+    def get_critical_exploits(cls) -> List[Dict]:
+        return [
+            {'cve': cve, **data}
+            for cve, data in cls.EXPLOITS.items()
+            if data['severity'] == 'CRITICAL'
+        ]
+    
+    @classmethod
+    def get_exploitable(cls) -> List[Dict]:
+        return [
+            {'cve': cve, **data}
+            for cve, data in cls.EXPLOITS.items()
+            if data.get('exploitable', False)
         ]

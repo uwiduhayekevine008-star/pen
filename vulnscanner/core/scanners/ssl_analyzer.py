@@ -1,10 +1,9 @@
-"""SSL/TLS Security Analyzer"""
+"""SSL/TLS Security Analyzer with Modern Testing"""
 import ssl
 import socket
 from typing import Dict, List, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-import hashlib
 
 
 @dataclass
@@ -16,6 +15,7 @@ class SSLVuln:
     cvss: float
     description: str
     remediation: str
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
 class SSLAnalyzer:
@@ -135,7 +135,6 @@ class SSLAnalyzer:
             
             with socket.create_connection((host, port), timeout=self.timeout) as sock:
                 with context.wrap_socket(sock, server_hostname=host) as ssock:
-                    # Check OpenSSL version if available
                     cipher = ssock.cipher()
                     if cipher and 'OpenSSL' in str(ssock.version()):
                         return SSLVuln(
@@ -149,6 +148,136 @@ class SSLAnalyzer:
             pass
         return None
     
+    def check_poodle(self, host: str, port: int = 443) -> Optional[SSLVuln]:
+        """Check for POODLE vulnerability (CVE-2014-3566)"""
+        try:
+            context = ssl.SSLContext(ssl.PROTOCOL_SSLv3)
+            context.verify_mode = ssl.CERT_NONE
+            
+            with socket.create_connection((host, port), timeout=self.timeout) as sock:
+                with context.wrap_socket(sock, server_hostname=host):
+                    return SSLVuln(
+                        host=host, port=port,
+                        issue='POODLE Vulnerable',
+                        severity='CRITICAL', cvss=7.5,
+                        description='SSLv3 POODLE vulnerability',
+                        remediation='Disable SSLv3'
+                    )
+        except:
+            pass
+        return None
+    
+    def check_beast(self, host: str, port: int = 443) -> Optional[SSLVuln]:
+        """Check for BEAST vulnerability (CVE-2011-3389)"""
+        try:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLSv1)
+            context.verify_mode = ssl.CERT_NONE
+            
+            with socket.create_connection((host, port), timeout=self.timeout) as sock:
+                with context.wrap_socket(sock, server_hostname=host):
+                    return SSLVuln(
+                        host=host, port=port,
+                        issue='BEAST Vulnerable',
+                        severity='MEDIUM', cvss=5.0,
+                        description='TLS 1.0 BEAST vulnerability',
+                        remediation='Use TLS 1.1+ with proper cipher configuration'
+                    )
+        except:
+            pass
+        return None
+    
+    def check_logjam(self, host: str, port: int = 443) -> Optional[SSLVuln]:
+        """Check for LOGJAM vulnerability (CVE-2015-4000)"""
+        try:
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            
+            with socket.create_connection((host, port), timeout=self.timeout) as sock:
+                with context.wrap_socket(sock, server_hostname=host) as ssock:
+                    cipher = ssock.cipher()
+                    if cipher and 'DHE' in cipher[0]:
+                        return SSLVuln(
+                            host=host, port=port,
+                            issue='LOGJAM Vulnerable',
+                            severity='MEDIUM', cvss=5.0,
+                            description='DH key exchange vulnerable to Logjam',
+                            remediation='Use strong DH parameters (2048+ bits)'
+                        )
+        except:
+            pass
+        return None
+    
+    def check_freak(self, host: str, port: int = 443) -> Optional[SSLVuln]:
+        """Check for FREAK vulnerability (CVE-2015-2730)"""
+        try:
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            
+            with socket.create_connection((host, port), timeout=self.timeout) as sock:
+                with context.wrap_socket(sock, server_hostname=host) as ssock:
+                    cipher = ssock.cipher()
+                    if cipher and 'EXPORT' in cipher[0]:
+                        return SSLVuln(
+                            host=host, port=port,
+                            issue='FREAK Vulnerable',
+                            severity='HIGH', cvss=7.5,
+                            description='Export-grade RSA vulnerable to FREAK',
+                            remediation='Disable export ciphers'
+                        )
+        except:
+            pass
+        return None
+    
+    def check_drown(self, host: str, port: int = 443) -> Optional[SSLVuln]:
+        """Check for DROWN vulnerability (CVE-2016-0800)"""
+        try:
+            context = ssl.SSLContext(ssl.PROTOCOL_SSLv2)
+            context.verify_mode = ssl.CERT_NONE
+            
+            with socket.create_connection((host, port), timeout=self.timeout) as sock:
+                with context.wrap_socket(sock, server_hostname=host):
+                    return SSLVuln(
+                        host=host, port=port,
+                        issue='DROWN Vulnerable',
+                        severity='CRITICAL', cvss=9.0,
+                        description='SSLv2 DROWN vulnerability',
+                        remediation='Disable SSLv2'
+                    )
+        except:
+            pass
+        return None
+    
+    def check_weak_ciphers(self, host: str, port: int = 443) -> List[SSLVuln]:
+        """Check for weak cipher suites"""
+        vulns = []
+        
+        try:
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            
+            with socket.create_connection((host, port), timeout=self.timeout) as sock:
+                with context.wrap_socket(sock, server_hostname=host) as ssock:
+                    cipher = ssock.cipher()
+                    cipher_name = cipher[0] if cipher else ''
+                    
+                    for weak in self.WEAK_CIPHERS:
+                        if weak in cipher_name:
+                            vulns.append(SSLVuln(
+                                host=host, port=port,
+                                issue=f'Weak Cipher: {cipher_name}',
+                                severity='HIGH', cvss=7.0,
+                                description=f'Cipher {cipher_name} is weak',
+                                remediation='Use strong cipher suites (AES-GCM, ChaCha20)'
+                            ))
+                            break
+        except:
+            pass
+        
+        return vulns
+    
     def full_analysis(self, host: str, port: int = 443) -> List[SSLVuln]:
         """Run complete SSL/TLS security analysis"""
         vulns = []
@@ -158,5 +287,27 @@ class SSLAnalyzer:
         heartbleed = self.check_heartbleed(host, port)
         if heartbleed:
             vulns.append(heartbleed)
+        
+        poodle = self.check_poodle(host, port)
+        if poodle:
+            vulns.append(poodle)
+        
+        beast = self.check_beast(host, port)
+        if beast:
+            vulns.append(beast)
+        
+        logjam = self.check_logjam(host, port)
+        if logjam:
+            vulns.append(logjam)
+        
+        freak = self.check_freak(host, port)
+        if freak:
+            vulns.append(freak)
+        
+        drown = self.check_drown(host, port)
+        if drown:
+            vulns.append(drown)
+        
+        vulns.extend(self.check_weak_ciphers(host, port))
         
         return vulns

@@ -1,9 +1,9 @@
-"""Web Application Security Scanner"""
+"""Web Application Security Scanner with Advanced Testing"""
 import asyncio
 import aiohttp
 from typing import List, Dict, Optional
-from dataclasses import dataclass
-import re
+from dataclasses import dataclass, field
+from datetime import datetime
 
 
 @dataclass
@@ -15,6 +15,7 @@ class WebVuln:
     description: str
     evidence: str
     remediation: str
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
 class WebScanner:
@@ -41,7 +42,10 @@ class WebScanner:
             'Content-Security-Policy': ('HIGH', 8.0, 'XSS mitigation'),
             'X-XSS-Protection': ('MEDIUM', 6.0, 'XSS filter'),
             'Referrer-Policy': ('LOW', 3.0, 'Referrer leakage'),
-            'Permissions-Policy': ('LOW', 3.0, 'Feature access control')
+            'Permissions-Policy': ('LOW', 3.0, 'Feature access control'),
+            'Cross-Origin-Embedder-Policy': ('MEDIUM', 5.0, 'Cross-origin protection'),
+            'Cross-Origin-Opener-Policy': ('MEDIUM', 5.0, 'Cross-origin protection'),
+            'Cross-Origin-Resource-Policy': ('MEDIUM', 5.0, 'Cross-origin protection')
         }
         
         try:
@@ -64,9 +68,10 @@ class WebScanner:
         vulns = []
         payloads = [
             "' OR '1'='1", "' OR '1'='1'--", "' UNION SELECT NULL--",
-            "1' ORDER BY 1--", "'; WAITFOR DELAY '0:0:3'--", "1' AND SLEEP(3)--"
+            "1' ORDER BY 1--", "'; WAITFOR DELAY '0:0:3'--", "1' AND SLEEP(3)--",
+            "' AND '1'='1", "' AND '1'='2", "' OR ''='", "' OR 'x'='x"
         ]
-        errors = ['sql syntax', 'mysql_fetch', 'ora-', 'postgresql', 'sqlite', 'odbc']
+        errors = ['sql syntax', 'mysql_fetch', 'ora-', 'postgresql', 'sqlite', 'odbc', 'syntax error']
         
         for payload in payloads:
             try:
@@ -95,7 +100,9 @@ class WebScanner:
             "<img src=x onerror=alert(1)>",
             "<svg onload=alert(1)>",
             "javascript:alert(1)",
-            "${alert(1)}"
+            "${alert(1)}",
+            "<ScRiPt>alert(1)</sCrIpT>",
+            "<img/src=x/onerror=alert(1)>"
         ]
         
         for payload in payloads:
@@ -174,6 +181,130 @@ class WebScanner:
                 pass
         return vulns
     
+    async def test_cmdi(self, url: str, param: str = 'cmd') -> List[WebVuln]:
+        """Test for Command Injection"""
+        vulns = []
+        payloads = [
+            "; id", "| id", "&& id", "$(id)", "`id`",
+            "; sleep 5", "| sleep 5", "; whoami"
+        ]
+        
+        for payload in payloads:
+            try:
+                test_url = f"{url}?{param}={payload}"
+                async with self.session.get(test_url) as resp:
+                    text = await resp.text()
+                    if 'uid=' in text or 'root:' in text or 'daemon:' in text:
+                        vulns.append(WebVuln(
+                            url=test_url, vuln_type='Command Injection',
+                            severity='CRITICAL', cvss=9.8,
+                            description='Command injection vulnerability',
+                            evidence='Command executed successfully',
+                            remediation='Sanitize command input'
+                        ))
+                        return vulns
+            except:
+                pass
+        return vulns
+    
+    async def test_ssti(self, url: str, param: str = 'template') -> List[WebVuln]:
+        """Test for Server-Side Template Injection"""
+        vulns = []
+        payloads = [
+            "{{7*7}}", "${7*7}", "#{7*7}",
+            "{{config}}", "{{self}}",
+            "{{''.__class__.__mro__[2].__subclasses__()}}"
+        ]
+        
+        for payload in payloads:
+            try:
+                test_url = f"{url}?{param}={payload}"
+                async with self.session.get(test_url) as resp:
+                    text = await resp.text()
+                    if '49' in text or 'config' in text.lower():
+                        vulns.append(WebVuln(
+                            url=test_url, vuln_type='Server-Side Template Injection',
+                            severity='CRITICAL', cvss=9.8,
+                            description='SSTI vulnerability',
+                            evidence='Template engine executed',
+                            remediation='Use safe template rendering'
+                        ))
+                        return vulns
+            except:
+                pass
+        return vulns
+    
+    async def test_open_redirect(self, url: str, param: str = 'redirect') -> List[WebVuln]:
+        """Test for Open Redirect"""
+        vulns = []
+        payloads = [
+            "//attacker.com", "https:attacker.com", "https:///attacker.com",
+            "///attacker.com", "http://attacker.com", "https://attacker.com"
+        ]
+        
+        for payload in payloads:
+            try:
+                test_url = f"{url}?{param}={payload}"
+                async with self.session.get(test_url, allow_redirects=False) as resp:
+                    location = resp.headers.get('Location', '')
+                    if payload in location or 'attacker.com' in location:
+                        vulns.append(WebVuln(
+                            url=test_url, vuln_type='Open Redirect',
+                            severity='MEDIUM', cvss=5.0,
+                            description='Open redirect vulnerability',
+                            evidence=f'Redirect to: {location}',
+                            remediation='Validate redirect URLs'
+                        ))
+                        return vulns
+            except:
+                pass
+        return vulns
+    
+    async def test_cors(self, url: str) -> List[WebVuln]:
+        """Test for CORS misconfiguration"""
+        vulns = []
+        
+        try:
+            async with self.session.get(url, headers={'Origin': 'http://attacker.com'}) as resp:
+                cors_header = resp.headers.get('Access-Control-Allow-Origin', '')
+                if cors_header == '*' or cors_header == 'http://attacker.com':
+                    vulns.append(WebVuln(
+                        url=url, vuln_type='CORS Misconfiguration',
+                        severity='HIGH', cvss=7.5,
+                        description='CORS allows any origin',
+                        evidence=f'Access-Control-Allow-Origin: {cors_header}',
+                        remediation='Restrict Access-Control-Allow-Origin'
+                    ))
+        except:
+            pass
+        
+        return vulns
+    
+    async def test_method_override(self, url: str) -> List[WebVuln]:
+        """Test for HTTP method override"""
+        vulns = []
+        
+        methods = ['PUT', 'DELETE', 'PATCH', 'CONNECT', 'TRACE', 'DEBUG']
+        
+        for method in methods:
+            try:
+                async with self.session.request(
+                    method, url, headers={'X-HTTP-Method-Override': method}
+                ) as resp:
+                    if resp.status in [200, 201, 204]:
+                        vulns.append(WebVuln(
+                            url=url, vuln_type='HTTP Method Override',
+                            severity='MEDIUM', cvss=5.0,
+                            description=f'Method {method} allowed via override',
+                            evidence=f'Status: {resp.status}',
+                            remediation='Restrict HTTP methods'
+                        ))
+                        return vulns
+            except:
+                pass
+        
+        return vulns
+    
     async def full_scan(self, url: str) -> List[WebVuln]:
         """Run all web security checks"""
         await self.init()
@@ -182,7 +313,12 @@ class WebScanner:
             self.test_sqli(url),
             self.test_xss(url),
             self.test_lfi(url),
-            self.test_ssrf(url)
+            self.test_ssrf(url),
+            self.test_cmdi(url),
+            self.test_ssti(url),
+            self.test_open_redirect(url),
+            self.test_cors(url),
+            self.test_method_override(url)
         ]
         results = await asyncio.gather(*tasks)
         await self.close()
