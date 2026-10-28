@@ -5,6 +5,8 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from vulnscanner.security import require_target_in_scope, validate_ports
+
 
 @dataclass
 class SSLVuln:
@@ -36,30 +38,52 @@ class SSLAnalyzer:
         self.timeout = timeout
     
     def check_protocol(self, host: str, port: int = 443) -> List[SSLVuln]:
-        """Check for vulnerable SSL/TLS protocols"""
+        """Check legacy TLS protocol negotiation using supported Python TLS APIs.
+
+        SSLv2/SSLv3 are omitted because modern Python/OpenSSL builds generally
+        cannot negotiate them; an unavailable runtime probe is not a finding.
+        """
+        require_target_in_scope(host)
+        validate_ports([port], maximum=1)
         vulns = []
-        
-        for proto_name, (sev, cvss, desc) in self.VULN_PROTOCOLS.items():
+        tls_version = getattr(ssl, "TLSVersion", None)
+        if tls_version is None:
+            return vulns
+        versions = {
+            "TLSv1.0": getattr(tls_version, "TLSv1", None),
+            "TLSv1.1": getattr(tls_version, "TLSv1_1", None),
+        }
+        for proto_name, version in versions.items():
+            if version is None:
+                continue
             try:
-                context = ssl.SSLContext(getattr(ssl, f'PROTOCOL_{proto_name.replace(".", "_")}'))
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                context.minimum_version = version
+                context.maximum_version = version
+                context.check_hostname = False
                 context.verify_mode = ssl.CERT_NONE
-                
                 with socket.create_connection((host, port), timeout=self.timeout) as sock:
-                    with context.wrap_socket(sock, server_hostname=host):
-                        vulns.append(SSLVuln(
-                            host=host, port=port,
-                            issue=f'{proto_name} Supported',
-                            severity=sev, cvss=cvss,
-                            description=desc,
-                            remediation=f'Disable {proto_name}'
-                        ))
-            except:
-                pass
-        
+                    with context.wrap_socket(sock, server_hostname=host) as wrapped:
+                        negotiated = wrapped.version()
+                if negotiated:
+                    sev, cvss, desc = self.VULN_PROTOCOLS[proto_name]
+                    vulns.append(SSLVuln(
+                        host=host, port=port,
+                        issue=f'{proto_name} Supported',
+                        severity=sev, cvss=cvss,
+                        description=desc,
+                        remediation=f'Disable {proto_name}'
+                    ))
+            except (OSError, ssl.SSLError, ValueError, AttributeError):
+                # A disabled or unsupported protocol does not prove the host is secure
+                # for other protocols; it simply did not negotiate this legacy version.
+                continue
         return vulns
     
     def check_certificate(self, host: str, port: int = 443) -> List[SSLVuln]:
         """Analyze certificate for issues"""
+        require_target_in_scope(host)
+        validate_ports([port], maximum=1)
         vulns = []
         
         try:
@@ -128,6 +152,8 @@ class SSLAnalyzer:
     
     def check_heartbleed(self, host: str, port: int = 443) -> Optional[SSLVuln]:
         """Check for Heartbleed vulnerability (CVE-2014-0160)"""
+        require_target_in_scope(host)
+        validate_ports([port], maximum=1)
         try:
             context = ssl.create_default_context()
             context.check_hostname = False
@@ -150,6 +176,8 @@ class SSLAnalyzer:
     
     def check_poodle(self, host: str, port: int = 443) -> Optional[SSLVuln]:
         """Check for POODLE vulnerability (CVE-2014-3566)"""
+        require_target_in_scope(host)
+        validate_ports([port], maximum=1)
         try:
             context = ssl.SSLContext(ssl.PROTOCOL_SSLv3)
             context.verify_mode = ssl.CERT_NONE
@@ -169,6 +197,8 @@ class SSLAnalyzer:
     
     def check_beast(self, host: str, port: int = 443) -> Optional[SSLVuln]:
         """Check for BEAST vulnerability (CVE-2011-3389)"""
+        require_target_in_scope(host)
+        validate_ports([port], maximum=1)
         try:
             context = ssl.SSLContext(ssl.PROTOCOL_TLSv1)
             context.verify_mode = ssl.CERT_NONE
@@ -188,6 +218,8 @@ class SSLAnalyzer:
     
     def check_logjam(self, host: str, port: int = 443) -> Optional[SSLVuln]:
         """Check for LOGJAM vulnerability (CVE-2015-4000)"""
+        require_target_in_scope(host)
+        validate_ports([port], maximum=1)
         try:
             context = ssl.create_default_context()
             context.check_hostname = False
@@ -210,6 +242,8 @@ class SSLAnalyzer:
     
     def check_freak(self, host: str, port: int = 443) -> Optional[SSLVuln]:
         """Check for FREAK vulnerability (CVE-2015-2730)"""
+        require_target_in_scope(host)
+        validate_ports([port], maximum=1)
         try:
             context = ssl.create_default_context()
             context.check_hostname = False
@@ -232,6 +266,8 @@ class SSLAnalyzer:
     
     def check_drown(self, host: str, port: int = 443) -> Optional[SSLVuln]:
         """Check for DROWN vulnerability (CVE-2016-0800)"""
+        require_target_in_scope(host)
+        validate_ports([port], maximum=1)
         try:
             context = ssl.SSLContext(ssl.PROTOCOL_SSLv2)
             context.verify_mode = ssl.CERT_NONE
@@ -251,6 +287,8 @@ class SSLAnalyzer:
     
     def check_weak_ciphers(self, host: str, port: int = 443) -> List[SSLVuln]:
         """Check for weak cipher suites"""
+        require_target_in_scope(host)
+        validate_ports([port], maximum=1)
         vulns = []
         
         try:
@@ -279,7 +317,9 @@ class SSLAnalyzer:
         return vulns
     
     def full_analysis(self, host: str, port: int = 443) -> List[SSLVuln]:
-        """Run complete SSL/TLS security analysis"""
+        """Run complete SSL/TLS security analysis for an authorized target."""
+        require_target_in_scope(host)
+        validate_ports([port], maximum=1)
         vulns = []
         vulns.extend(self.check_protocol(host, port))
         vulns.extend(self.check_certificate(host, port))

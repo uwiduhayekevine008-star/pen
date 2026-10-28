@@ -24,6 +24,9 @@ class SSHChecker:
     
     @staticmethod
     async def check(host: str, port: int = 22, timeout: int = 5) -> List[ServiceVuln]:
+        require_target_in_scope(host)
+        validate_ports([port], maximum=1)
+        require_feature_enabled('PEN_ENABLE_SERVICE_PROBES', 'Service-specific probes')
         vulns = []
         
         try:
@@ -73,6 +76,9 @@ class FTPChecker:
     
     @staticmethod
     async def check(host: str, port: int = 21, timeout: int = 5) -> List[ServiceVuln]:
+        require_target_in_scope(host)
+        validate_ports([port], maximum=1)
+        require_feature_enabled('PEN_ENABLE_SERVICE_PROBES', 'Service-specific probes')
         vulns = []
         
         try:
@@ -117,6 +123,9 @@ class SMBChecker:
     
     @staticmethod
     async def check(host: str, port: int = 445, timeout: int = 5) -> List[ServiceVuln]:
+        require_target_in_scope(host)
+        validate_ports([port], maximum=1)
+        require_feature_enabled('PEN_ENABLE_SERVICE_PROBES', 'Service-specific probes')
         vulns = []
         
         try:
@@ -164,6 +173,9 @@ class DatabaseChecker:
     
     @staticmethod
     async def check_mysql(host: str, port: int = 3306, timeout: int = 5) -> List[ServiceVuln]:
+        require_target_in_scope(host)
+        validate_ports([port], maximum=1)
+        require_feature_enabled('PEN_ENABLE_SERVICE_PROBES', 'Service-specific probes')
         vulns = []
         
         try:
@@ -225,6 +237,9 @@ class DatabaseChecker:
     
     @staticmethod
     async def check_mongodb(host: str, port: int = 27017, timeout: int = 5) -> List[ServiceVuln]:
+        require_target_in_scope(host)
+        validate_ports([port], maximum=1)
+        require_feature_enabled('PEN_ENABLE_SERVICE_PROBES', 'Service-specific probes')
         vulns = []
         
         try:
@@ -261,6 +276,9 @@ class WebServiceChecker:
     
     @staticmethod
     async def check_apache(host: str, port: int = 80, timeout: int = 5) -> List[ServiceVuln]:
+        require_target_in_scope(host)
+        validate_ports([port], maximum=1)
+        require_feature_enabled('PEN_ENABLE_SERVICE_PROBES', 'Service-specific probes')
         vulns = []
         
         try:
@@ -285,6 +303,9 @@ class WebServiceChecker:
     
     @staticmethod
     async def check_nginx(host: str, port: int = 80, timeout: int = 5) -> List[ServiceVuln]:
+        require_target_in_scope(host)
+        validate_ports([port], maximum=1)
+        require_feature_enabled('PEN_ENABLE_SERVICE_PROBES', 'Service-specific probes')
         vulns = []
         
         try:

@@ -5,8 +5,11 @@ Real-time monitoring and control interface for the vulnerability scanner
 
 import asyncio
 import json
-from datetime import datetime
+import os
+from datetime import datetime, timezone
 from typing import Dict, Set
+
+from vulnscanner.security import ScopeError, require_feature_enabled, validate_targets
 import websockets
 from websockets.server import serve
 
@@ -17,7 +20,8 @@ class DashboardServer:
     def __init__(self, scanner_engine=None):
         self.scanner = scanner_engine
         self.clients: Set[websockets.WebSocketServerProtocol] = set()
-        self.scan_status = {}
+        self.scan_status = {'status': 'idle'}
+        self.scan_task = None
         
     async def register(self, websocket):
         """Register new client"""
@@ -52,19 +56,32 @@ class DashboardServer:
             )
             
     async def handle_message(self, websocket, message: str):
-        """Handle incoming message from client"""
+        """Handle bounded dashboard commands; scan requests are scoped and passive."""
         try:
+            if len(message) > 8192:
+                await websocket.send(json.dumps({'type': 'error', 'message': 'Message exceeds size limit'}))
+                return
             data = json.loads(message)
+            if not isinstance(data, dict):
+                await websocket.send(json.dumps({'type': 'error', 'message': 'JSON object required'}))
+                return
             command = data.get('command')
-            
+
             if command == 'start_scan':
-                target = data.get('target')
-                response = {
-                    'type': 'response',
-                    'command': 'start_scan',
-                    'status': 'initiated',
-                    'target': target
-                }
+                try:
+                    target = data.get('target')
+                    target_list = validate_targets([target], maximum=1)
+                    if '://' in target or '/' in target:
+                        raise ScopeError('Dashboard scans require a hostname or IP, not a URL or CIDR')
+                except ScopeError as exc:
+                    await websocket.send(json.dumps({'type': 'response', 'command': 'start_scan', 'status': 'rejected', 'message': str(exc)}))
+                    return
+                if self.scan_task and not self.scan_task.done():
+                    response = {'type': 'response', 'command': 'start_scan', 'status': 'busy', 'message': 'A scan is already running'}
+                else:
+                    self.scan_status = {'status': 'running', 'target': target_list[0], 'started_at': datetime.now(timezone.utc).isoformat()}
+                    self.scan_task = asyncio.create_task(self._run_scoped_scan(target_list[0]))
+                    response = {'type': 'response', 'command': 'start_scan', 'status': 'initiated', 'target': target_list[0]}
                 await websocket.send(json.dumps(response))
                 
             elif command == 'get_results':
@@ -109,7 +126,28 @@ class DashboardServer:
                 
         except json.JSONDecodeError:
             await websocket.send(json.dumps({'type': 'error', 'message': 'Invalid JSON'}))
+        except (TypeError, ValueError) as exc:
+            await websocket.send(json.dumps({'type': 'error', 'message': 'Invalid request'}))
             
+    async def _run_scoped_scan(self, target: str):
+        """Run one passive scan and report status without exposing exception details."""
+        from vulnscanner.core.engine import ScannerEngine
+        engine = ScannerEngine()
+        self.scanner = engine
+        try:
+            engine.add_target(target)
+            await engine.run_full_scan()
+            self.scan_status = {'status': 'completed', 'target': target, 'completed_at': datetime.now(timezone.utc).isoformat(), 'vulnerabilities_found': len(engine.results)}
+            await self.broadcast({'type': 'scan_status', **self.scan_status})
+        except asyncio.CancelledError:
+            self.scan_status = {'status': 'cancelled', 'target': target}
+            raise
+        except Exception:
+            self.scan_status = {'status': 'failed', 'target': target, 'message': 'Scan failed; check server logs'}
+            await self.broadcast({'type': 'scan_status', **self.scan_status})
+        finally:
+            await engine.close()
+
     async def handler(self, websocket):
         """Main handler for WebSocket connections"""
         await self.register(websocket)
@@ -142,11 +180,16 @@ class DashboardServer:
             'timestamp': datetime.now().isoformat()
         })
         
-    async def start(self, host: str = "0.0.0.0", port: int = 8765):
-        """Start the WebSocket server"""
+    async def start(self, host: str = "127.0.0.1", port: int = 8765):
+        """Start the opt-in local-only dashboard (no remote TLS/auth layer)."""
+        require_feature_enabled('PEN_ENABLE_DASHBOARD', 'Dashboard server')
+        if host not in {'127.0.0.1', 'localhost', '::1'}:
+            raise RuntimeError('Dashboard is restricted to loopback until authentication and TLS are implemented')
+        if not 1 <= int(port) <= 65535:
+            raise ValueError('Port must be between 1 and 65535')
         print(f"[*] Dashboard WebSocket server starting on {host}:{port}")
-        async with serve(self.handler, host, port):
-            print(f"[+] Dashboard ready - ws://{host}:{port}")
+        async with serve(self.handler, host, port, max_size=8192, max_queue=16, ping_interval=20, ping_timeout=20):
+            print(f"[+] Local dashboard ready - ws://{host}:{port}")
             await asyncio.Future()  # Run forever
 
 

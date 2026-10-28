@@ -6,6 +6,8 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from vulnscanner.security import require_target_in_scope, validate_ports
+
 
 @dataclass
 class ServiceInfo:
@@ -41,36 +43,34 @@ class NetworkScanner:
         self.executor = None
     
     async def scan_port(self, host: str, port: int) -> Optional[ServiceInfo]:
-        """Scan single port with service detection"""
+        """Scan one authorized TCP port without blocking the event loop."""
+        require_target_in_scope(host)
+        validate_ports([port], maximum=1)
+        return await asyncio.to_thread(self._scan_port_sync, host, port)
+
+    def _scan_port_sync(self, host: str, port: int) -> Optional[ServiceInfo]:
+        """Blocking socket work used by the bounded async wrapper."""
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(self.timeout)
-            result = sock.connect_ex((host, port))
-            
-            if result == 0:
-                service_info = ServiceInfo(
-                    port=port,
-                    protocol='tcp',
-                    state='open',
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(self.timeout)
+                if sock.connect_ex((host, port)) != 0:
+                    return None
+                info = ServiceInfo(
+                    port=port, protocol='tcp', state='open',
                     service=self.COMMON_PORTS.get(port, 'unknown')
                 )
-                
-                # Grab banner
                 try:
-                    sock.settimeout(1.0)
-                    sock.send(b'\r\n')
+                    sock.settimeout(min(1.0, self.timeout))
+                    sock.sendall(b'\r\n')
                     banner = sock.recv(1024).decode('utf-8', errors='ignore').strip()
                     if banner:
-                        service_info.banner = banner[:200]
-                        service_info = self._parse_banner(service_info, banner)
-                except:
+                        info.banner = banner[:200]
+                        info = self._parse_banner(info, banner)
+                except (OSError, TimeoutError):
                     pass
-                
-                sock.close()
-                return service_info
-        except:
-            pass
-        return None
+                return info
+        except (OSError, TimeoutError, ValueError):
+            return None
     
     def _parse_banner(self, service: ServiceInfo, banner: str) -> ServiceInfo:
         """Parse banner for service info"""
@@ -107,12 +107,18 @@ class NetworkScanner:
         return service
     
     async def scan_ports(self, host: str, ports: List[int] = None) -> Dict[int, ServiceInfo]:
-        """Scan multiple ports concurrently"""
-        ports = ports or list(self.COMMON_PORTS.keys())
-        tasks = [self.scan_port(host, port) for port in ports]
-        results = await asyncio.gather(*tasks)
-        
-        return {r.port: r for r in results if r is not None}
+        """Scan an allowlisted host's ports with a bounded worker count."""
+        require_target_in_scope(host)
+        ports = validate_ports(ports) if ports is not None else list(self.COMMON_PORTS.keys())
+        workers = min(max(int(self.max_workers), 1), 100)
+        semaphore = asyncio.Semaphore(workers)
+
+        async def limited(port: int):
+            async with semaphore:
+                return await self.scan_port(host, port)
+
+        results = await asyncio.gather(*(limited(port) for port in ports))
+        return {result.port: result for result in results if result is not None}
     
     async def scan_range(self, host: str, start: int, end: int) -> Dict[int, ServiceInfo]:
         """Scan port range"""
@@ -121,6 +127,7 @@ class NetworkScanner:
     
     async def detect_os(self, host: str) -> Dict:
         """Basic OS detection via TCP fingerprinting"""
+        require_target_in_scope(host)
         result = {'detected': False, 'os': 'unknown', 'confidence': 0}
         
         try:
@@ -144,7 +151,9 @@ class NetworkScanner:
         return result
     
     async def get_service_version(self, host: str, port: int) -> Dict:
-        """Get detailed service version information"""
+        """Get service version information for an authorized host and port."""
+        require_target_in_scope(host)
+        validate_ports([port], maximum=1)
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(2.0)
