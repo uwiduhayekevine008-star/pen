@@ -19,7 +19,14 @@ class PayloadManager:
             'ssti': self._ssti_payloads(),
             'open redirect': self._redirect_payloads(),
             'ldap': self._ldap_payloads(),
-            'xespi': self._xespi_payloads()
+            'xespi': self._xespi_payloads(),
+            'waf_bypass': self._waf_bypass_payloads(),
+            'polymorphic': self._polymorphic_payloads(),
+            'iot': self._iot_payloads(),
+            'graphql': self._graphql_payloads(),
+            'websocket': self._websocket_payloads(),
+            'nosql': self._nosql_payloads(),
+            'prototype_pollution': self._prototype_pollution_payloads()
         }
     
     def _sqli_payloads(self) -> List[str]:
