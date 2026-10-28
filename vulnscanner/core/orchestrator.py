@@ -28,7 +28,6 @@ class VulnerabilityScanner:
         """Full vulnerability scan of a single host"""
         start_time = datetime.now()
         
-        # 1. Port scan
         if self.verbose:
             print(f"[*] Scanning ports on {host}")
         
@@ -36,7 +35,6 @@ class VulnerabilityScanner:
         port_scanner = NetworkScanner(timeout=self.timeout)
         open_ports = await port_scanner.scan_ports(host, ports)
         
-        # 2. Service-specific checks
         if self.verbose:
             print(f"[*] Running service checks on {host}")
         
@@ -47,7 +45,6 @@ class VulnerabilityScanner:
             vulns = await check_service(host, port, service_info.service)
             service_vulns.extend(vulns)
         
-        # 3. Web application scanning
         web_vulns = []
         for port, service_info in open_ports.items():
             if service_info.service in ['http', 'https', 'http-proxy']:
@@ -62,7 +59,6 @@ class VulnerabilityScanner:
                 vulns = await web_scanner.full_scan(url)
                 web_vulns.extend(vulns)
         
-        # 4. SSL/TLS analysis
         ssl_vulns = []
         if 443 in open_ports or any('https' in open_ports[p].service for p in open_ports):
             if self.verbose:
@@ -72,7 +68,6 @@ class VulnerabilityScanner:
             ssl_analyzer = SSLAnalyzer(timeout=self.timeout)
             ssl_vulns = ssl_analyzer.full_analysis(host, 443)
         
-        # 5. Directory scanning for web services
         dir_vulns = []
         if self.config.get('full_scan'):
             for port in [80, 443, 8080]:
@@ -92,7 +87,6 @@ class VulnerabilityScanner:
                                 'description': f'Sensitive file accessible: {f.url}'
                             })
         
-        # 6. Exploit checks
         if self.verbose:
             print(f"[*] Running exploit checks on {host}")
         
@@ -100,7 +94,6 @@ class VulnerabilityScanner:
         exploit_scanner = ExploitScanner(timeout=self.timeout)
         exploit_results = await exploit_scanner.full_scan(host, open_ports)
         
-        # Compile results
         all_vulns = []
         all_vulns.extend([v.__dict__ for v in service_vulns])
         all_vulns.extend([v.__dict__ for v in web_vulns])
@@ -109,7 +102,6 @@ class VulnerabilityScanner:
         
         exploits = [e.__dict__ for e in exploit_results if e.vulnerable]
         
-        # Calculate risk score
         risk_score = self._calculate_risk(all_vulns, exploits)
         
         return ScanResult(

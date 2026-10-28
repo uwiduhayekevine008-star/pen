@@ -1,13 +1,13 @@
-from .orchestrator import VulnerabilityScanner, ScanResult, quick_scan, full_scan
-from .scanners.network import NetworkScanner, ServiceInfo
-from .scanners.web import WebScanner, WebVuln
-from .scanners.ssl_analyzer import SSLAnalyzer, SSLVuln
-from .scanners.directory import DirectoryScanner, DiscoveredFile
-from .checks.exploits import ExploitScanner, ExploitCheck
-from .checks.payloads import AdvancedPayloads
-from .checks.cve_db import CVEDatabase, ExploitDatabase
-from .checks.services import check_service
-from .reporter import ReportGenerator
+from vulnscanner.core.orchestrator import VulnerabilityScanner, ScanResult, quick_scan, full_scan
+from vulnscanner.core.scanners.network import NetworkScanner, ServiceInfo
+from vulnscanner.core.scanners.web import WebScanner, WebVuln
+from vulnscanner.core.scanners.ssl_analyzer import SSLAnalyzer, SSLVuln
+from vulnscanner.core.scanners.directory import DirectoryScanner, DiscoveredFile
+from vulnscanner.core.checks.exploits import ExploitScanner, ExploitCheck
+from vulnscanner.core.checks.payloads import AdvancedPayloads
+from vulnscanner.core.checks.cve_db import CVEDatabase, ExploitDatabase
+from vulnscanner.core.checks.services import check_service
+from vulnscanner.core.reporter import ReportGenerator
 
 __all__ = [
     'VulnerabilityScanner', 'ScanResult', 'quick_scan', 'full_scan',

@@ -4,7 +4,8 @@ import json
 import socket
 import platform
 from typing import Dict, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 import uuid
 
 
@@ -35,7 +36,6 @@ class RemoteAgent:
             )
             reader, writer = self.socket
             
-            # Register
             reg = {
                 'type': 'register',
                 'agent_id': self.agent_id,
@@ -77,7 +77,6 @@ class RemoteAgent:
                 await writer.drain()
                 
             except asyncio.TimeoutError:
-                # Send heartbeat
                 heartbeat = {'type': 'heartbeat', 'agent_id': self.agent_id}
                 writer.write(json.dumps(heartbeat).encode() + b'\n')
                 await writer.drain()
@@ -133,8 +132,6 @@ class RemoteAgent:
         while True:
             if await self.connect():
                 await self.listen()
-            
-            # Reconnect delay
             await asyncio.sleep(10)
 
 

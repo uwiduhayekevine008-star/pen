@@ -1,3 +1,4 @@
+"""Advanced Report Generator with Professional Output"""
 import json
 import csv
 import os
@@ -7,6 +8,8 @@ from dataclasses import asdict
 
 
 class ReportGenerator:
+    """Professional report generator with multiple output formats"""
+    
     def __init__(self, vulnerabilities: List = None, exploits: List = None):
         self.vulnerabilities = vulnerabilities or []
         self.exploits = exploits or []
@@ -27,7 +30,7 @@ class ReportGenerator:
             'exploit_available': vuln.exploit_available,
             'timestamp': vuln.timestamp
         }
-
+    
     def _calculate_statistics(self) -> Dict:
         severity_counts = {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0, 'INFO': 0}
         for vuln in self.vulnerabilities:
@@ -49,7 +52,7 @@ class ReportGenerator:
             'average_cvss': round(avg_cvss, 2),
             'report_generated': datetime.now().isoformat()
         }
-
+    
     def export_json(self, output_path: str) -> None:
         data = {
             'statistics': self._calculate_statistics(),
@@ -61,15 +64,15 @@ class ReportGenerator:
             json.dump(data, f, indent=2, default=str)
         
         print(f"[+] JSON report saved: {output_path}")
-
+    
     def export_csv(self, output_path: str) -> None:
         vuln_dicts = [self._vuln_to_dict(v) for v in self.vulnerabilities]
         
         if not vuln_dicts:
             print("[-] No vulnerabilities to export")
             return
-            
-        fieldnames = list(vuln_dicts[0].keys())
+        
+        fieldnames = list(vuln_dicts[0].keys()) if vuln_dicts else []
         
         with open(output_path, 'w', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -77,17 +80,14 @@ class ReportGenerator:
             writer.writerows(vuln_dicts)
         
         print(f"[+] CSV report saved: {output_path}")
-
+    
     def export_html(self, output_path: str) -> None:
         stats = self._calculate_statistics()
         vulns = [self._vuln_to_dict(v) for v in self.vulnerabilities]
         
         severity_colors = {
-            'CRITICAL': '#9c27b0',
-            'HIGH': '#f44336',
-            'MEDIUM': '#ff9800',
-            'LOW': '#4caf50',
-            'INFO': '#2196f3'
+            'CRITICAL': '#9c27b0', 'HIGH': '#f44336',
+            'MEDIUM': '#ff9800', 'LOW': '#4caf50', 'INFO': '#2196f3'
         }
         
         html = f'''<!DOCTYPE html>
@@ -193,7 +193,7 @@ class ReportGenerator:
             f.write(html)
         
         print(f"[+] HTML report saved: {output_path}")
-
+    
     def generate_executive_summary(self) -> str:
         stats = self._calculate_statistics()
         
@@ -238,7 +238,7 @@ PRIORITY RECOMMENDATIONS
         summary += "\n================================================================================\n"
         
         return summary
-
+    
     def export_all(self, output_dir: str) -> None:
         os.makedirs(output_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

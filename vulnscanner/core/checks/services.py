@@ -2,7 +2,8 @@
 import asyncio
 import socket
 from typing import Dict, List, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 
 
 @dataclass
@@ -15,6 +16,7 @@ class ServiceVuln:
     description: str
     evidence: str
     remediation: str
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
 class SSHChecker:
@@ -29,11 +31,9 @@ class SSHChecker:
                 asyncio.open_connection(host, port), timeout=timeout
             )
             
-            # Get SSH banner
             banner = await asyncio.wait_for(reader.readline(), timeout=timeout)
             banner_str = banner.decode('utf-8', errors='ignore').strip()
             
-            # Check for weak versions
             if 'SSH-1.' in banner_str:
                 vulns.append(ServiceVuln(
                     service='SSH', port=port,
@@ -44,7 +44,6 @@ class SSHChecker:
                     remediation='Disable SSHv1, use SSHv2 only'
                 ))
             
-            # Check for old OpenSSH versions
             if 'OpenSSH' in banner_str:
                 try:
                     version = float(banner_str.split('OpenSSH_')[1].split()[0])
@@ -84,7 +83,6 @@ class FTPChecker:
             banner = await asyncio.wait_for(reader.readline(), timeout=timeout)
             banner_str = banner.decode('utf-8', errors='ignore').strip()
             
-            # Check for anonymous FTP
             writer.write(b'USER anonymous\r\n')
             await writer.drain()
             user_resp = await reader.readline()
@@ -126,7 +124,6 @@ class SMBChecker:
                 asyncio.open_connection(host, port), timeout=timeout
             )
             
-            # SMB negotiate
             negotiate = bytes.fromhex(
                 "00000085ff534d4272000000001853c00000000000000000000000000000fffe0000"
                 "00000000000000000000000000000000000000000000000000000000000000000000"
@@ -139,7 +136,6 @@ class SMBChecker:
             
             response = await asyncio.wait_for(reader.read(1024), timeout=timeout)
             
-            # Check SMB signing
             if len(response) > 70:
                 flags = response[70:72]
                 signing_required = bool(flags[1] & 0x80) if len(flags) > 1 else False
@@ -175,11 +171,9 @@ class DatabaseChecker:
                 asyncio.open_connection(host, port), timeout=timeout
             )
             
-            # MySQL greeting packet
             greeting = await asyncio.wait_for(reader.read(1024), timeout=timeout)
             
             if b'mysql' in greeting.lower() or b'maria' in greeting.lower():
-                # Check for empty root password (basic check)
                 vulns.append(ServiceVuln(
                     service='MySQL', port=port,
                     vuln_type='MySQL Exposed',
@@ -228,6 +222,90 @@ class DatabaseChecker:
             pass
         
         return vulns
+    
+    @staticmethod
+    async def check_mongodb(host: str, port: int = 27017, timeout: int = 5) -> List[ServiceVuln]:
+        vulns = []
+        
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=timeout
+            )
+            
+            writer.write(b'\x3f\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\xdb\x00\x00\x00\x00\x00\x00\x00\x07\x00\x00\x00\x24\x69\x6e\x66\x6f\x00\x00\x00\x00\x00')
+            await writer.drain()
+            
+            response = await asyncio.wait_for(reader.read(4096), timeout=timeout)
+            
+            if b'mongod' in response.lower() or b'mongodb' in response.lower():
+                vulns.append(ServiceVuln(
+                    service='MongoDB', port=port,
+                    vuln_type='MongoDB Exposed',
+                    severity='HIGH', cvss=7.5,
+                    description='MongoDB service exposed without authentication',
+                    evidence='MongoDB greeting received',
+                    remediation='Enable MongoDB authentication'
+                ))
+            
+            writer.close()
+            await writer.wait_closed()
+            
+        except:
+            pass
+        
+        return vulns
+
+
+class WebServiceChecker:
+    """Web service security checker"""
+    
+    @staticmethod
+    async def check_apache(host: str, port: int = 80, timeout: int = 5) -> List[ServiceVuln]:
+        vulns = []
+        
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f'http://{host}:{port}/', timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+                    server_header = resp.headers.get('Server', '')
+                    
+                    if 'Apache' in server_header:
+                        vulns.append(ServiceVuln(
+                            service='Apache', port=port,
+                            vuln_type='Apache Server Exposed',
+                            severity='LOW', cvss=3.0,
+                            description='Apache server version exposed',
+                            evidence=f'Server: {server_header}',
+                            remediation='Hide server version in configuration'
+                        ))
+        except:
+            pass
+        
+        return vulns
+    
+    @staticmethod
+    async def check_nginx(host: str, port: int = 80, timeout: int = 5) -> List[ServiceVuln]:
+        vulns = []
+        
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f'http://{host}:{port}/', timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+                    server_header = resp.headers.get('Server', '')
+                    
+                    if 'nginx' in server_header:
+                        vulns.append(ServiceVuln(
+                            service='Nginx', port=port,
+                            vuln_type='Nginx Server Exposed',
+                            severity='LOW', cvss=3.0,
+                            description='Nginx server version exposed',
+                            evidence=f'Server: {server_header}',
+                            remediation='Hide server version in configuration'
+                        ))
+        except:
+            pass
+        
+        return vulns
 
 
 async def check_service(host: str, port: int, service: str) -> List[ServiceVuln]:
@@ -237,7 +315,10 @@ async def check_service(host: str, port: int, service: str) -> List[ServiceVuln]
         'ftp': FTPChecker.check,
         'smb': SMBChecker.check,
         'mysql': DatabaseChecker.check_mysql,
-        'redis': DatabaseChecker.check_redis
+        'redis': DatabaseChecker.check_redis,
+        'mongodb': DatabaseChecker.check_mongodb,
+        'http': WebServiceChecker.check_apache,
+        'https': WebServiceChecker.check_apache
     }
     
     checker = checkers.get(service.lower())
